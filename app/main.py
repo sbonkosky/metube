@@ -17,6 +17,7 @@ import re
 from watchfiles import DefaultFilter, Change, awatch
 
 from ytdl import DownloadQueueNotifier, DownloadQueue
+from dl_formats import AUDIO_FORMATS
 from yt_dlp.version import __version__ as yt_dlp_version
 
 log = logging.getLogger('main')
@@ -61,6 +62,8 @@ class Config:
         'OUTPUT_TEMPLATE_CHANNEL': '%(channel)s/%(title)s.%(ext)s',
         'DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT' : '0',
         'PLAYLIST_ITEMS_OLDEST_FIRST': 'false',
+        'SKIP_EXISTING_DOWNLOADS': 'false',
+        'RETRY_403_MAX': '0',
         'YTDL_OPTIONS': '{}',
         'YTDL_OPTIONS_FILE': '',
         'ROBOTS_TXT': '',
@@ -76,7 +79,7 @@ class Config:
         'ENABLE_ACCESSLOG': 'false',
     }
 
-    _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'DELETE_FILE_ON_TRASHCAN', 'PLAYLIST_ITEMS_OLDEST_FIRST', 'HTTPS', 'ENABLE_ACCESSLOG')
+    _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'DELETE_FILE_ON_TRASHCAN', 'PLAYLIST_ITEMS_OLDEST_FIRST', 'SKIP_EXISTING_DOWNLOADS', 'HTTPS', 'ENABLE_ACCESSLOG')
 
     def __init__(self):
         for k, v in self._DEFAULTS.items():
@@ -137,6 +140,57 @@ config = Config()
 # overridden by config file settings or differs from the environment variable.
 logging.getLogger().setLevel(parseLogLevel(str(config.LOGLEVEL)) or logging.INFO)
 
+_playlist_lock = asyncio.Lock()
+
+def _is_audio_download(dl):
+    return dl.quality == 'audio' or (dl.format in AUDIO_FORMATS)
+
+def _sanitize_playlist_name(name, fallback=None):
+    if not name:
+        name = fallback or 'playlist'
+    name = re.sub(r'[\\/:*?"<>|]', '_', str(name)).strip()
+    return name or (fallback or 'playlist')
+
+async def _update_audio_playlist_file(dl):
+    entry = dl.entry if isinstance(getattr(dl, 'entry', None), dict) else {}
+    playlist_name = entry.get('playlist_title') or entry.get('playlist') or entry.get('playlist_id')
+    if not playlist_name or not getattr(dl, 'filename', None):
+        return
+    if not _is_audio_download(dl):
+        return
+
+    playlist_dir = os.path.join(config.AUDIO_DOWNLOAD_DIR, '_playlists')
+    os.makedirs(playlist_dir, exist_ok=True)
+    download_dir = os.path.join(config.AUDIO_DOWNLOAD_DIR, dl.folder) if dl.folder else config.AUDIO_DOWNLOAD_DIR
+    media_path = os.path.join(download_dir, dl.filename)
+    try:
+        rel_path = os.path.relpath(media_path, playlist_dir)
+    except ValueError:
+        rel_path = media_path
+
+    playlist_file = os.path.join(playlist_dir, f"{_sanitize_playlist_name(playlist_name)}.m3u8")
+
+    async with _playlist_lock:
+        existing_lines = []
+        if os.path.exists(playlist_file):
+            try:
+                with open(playlist_file, 'r', encoding='utf-8') as handle:
+                    existing_lines = handle.read().splitlines()
+            except OSError as exc:
+                log.warning(f"Failed to read playlist file {playlist_file}: {exc}")
+                existing_lines = []
+
+        has_header = existing_lines and existing_lines[0].strip() == '#EXTM3U'
+        body = existing_lines[1:] if has_header else existing_lines
+        body = [line for line in body if line.strip() != rel_path]
+        new_lines = ['#EXTM3U', rel_path] + body
+
+        try:
+            with open(playlist_file, 'w', encoding='utf-8') as handle:
+                handle.write('\n'.join(new_lines) + '\n')
+        except OSError as exc:
+            log.warning(f"Failed to write playlist file {playlist_file}: {exc}")
+
 class ObjectSerializer(json.JSONEncoder):
     def default(self, obj):
         # First try to use __dict__ for custom objects
@@ -169,6 +223,7 @@ class Notifier(DownloadQueueNotifier):
 
     async def completed(self, dl):
         log.info(f"Notifier: Download completed - {dl.title}")
+        await _update_audio_playlist_file(dl)
         await sio.emit('completed', serializer.encode(dl))
 
     async def canceled(self, id):
@@ -298,6 +353,11 @@ async def history(request):
 
     log.info("Sending download history")
     return web.Response(text=serializer.encode(history))
+
+@routes.get(config.URL_PREFIX + 'db')
+@routes.get(config.URL_PREFIX + 'db/')
+def db_browser(request):
+    return web.FileResponse(Path(__file__).resolve().parent / 'db.html')
 
 @sio.event
 async def connect(sid, environ):

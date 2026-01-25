@@ -341,7 +341,7 @@
         </tr>
       </thead>
       <tbody>
-        @for (download of downloads.queue | keyvalue: asIsOrder; track download.value.id) {
+        @for (download of downloads.queue | keyvalue: asIsOrder; track download.key) {
           <tr [class.disabled]='download.value.deleting'>
             <td>
               <app-slave-checkbox [id]="download.key" [master]="queueMasterCheckboxRef" [checkable]="download.value" />
@@ -391,7 +391,7 @@
         </tr>
       </thead>
       <tbody>
-        @for (download of downloads.done | keyvalue: asIsOrder; track download.value.id) {
+        @for (download of downloads.done | keyvalue: asIsOrder; track download.key) {
           <tr [class.disabled]='download.value.deleting'>
             <td>
               <app-slave-checkbox [id]="download.key" [master]="doneMasterCheckboxRef" [checkable]="download.value" />

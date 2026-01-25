@@ -13,6 +13,7 @@ import dbm
 import subprocess
 from typing import Any
 from functools import lru_cache
+import uuid
 
 import yt_dlp.networking.impersonate
 from yt_dlp.utils import STR_FORMAT_RE_TMPL, STR_FORMAT_TYPES
@@ -69,6 +70,12 @@ def _convert_generators_to_lists(obj):
     else:
         return obj
 
+def _ensure_download_id(info, fallback=None):
+    if getattr(info, 'download_id', None):
+        return info.download_id
+    info.download_id = fallback or uuid.uuid4().hex
+    return info.download_id
+
 class DownloadQueueNotifier:
     async def added(self, dl):
         raise NotImplementedError
@@ -86,7 +93,7 @@ class DownloadQueueNotifier:
         raise NotImplementedError
 
 class DownloadInfo:
-    def __init__(self, id, title, url, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template):
+    def __init__(self, id, title, url, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template, skip_existing_downloads=False, retry_403_max=0):
         self.id = id if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{id}'
         self.title = title if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{title}'
         self.url = url
@@ -98,6 +105,9 @@ class DownloadInfo:
         self.status = "pending"
         self.size = None
         self.timestamp = time.time_ns()
+        self.download_id = uuid.uuid4().hex
+        self.skip_existing_downloads = skip_existing_downloads
+        self.retry_403_max = retry_403_max
         self.error = error
         # Convert generators to lists to make entry pickleable
         self.entry = _convert_generators_to_lists(entry) if entry is not None else None
@@ -115,6 +125,8 @@ class Download:
         self.output_template_chapter = output_template_chapter
         self.format = get_format(format, quality)
         self.ytdl_opts = get_opts(format, quality, ytdl_opts)
+        if getattr(info, 'skip_existing_downloads', False) and 'overwrites' not in self.ytdl_opts and 'nooverwrites' not in self.ytdl_opts:
+            self.ytdl_opts['overwrites'] = False
         if "impersonate" in self.ytdl_opts:
             self.ytdl_opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.ytdl_opts["impersonate"])
         self.info = info
@@ -196,11 +208,67 @@ class Download:
                     'force_keyframes': False
                 })
 
-            ret = yt_dlp.YoutubeDL(params=ytdl_params).download([self.info.url])
-            self.status_queue.put({'status': 'finished' if ret == 0 else 'error'})
-            log.info(f"Finished download for: {self.info.title}")
-        except yt_dlp.utils.YoutubeDLError as exc:
-            log.error(f"Download error for {self.info.title}: {str(exc)}")
+            def find_existing_path():
+                try:
+                    ydl = yt_dlp.YoutubeDL(params=ytdl_params)
+                    info = ydl.extract_info(self.info.url, download=False)
+                    filename = ydl.prepare_filename(info)
+                except Exception as exc:
+                    log.debug(f"Existing file check failed for {self.info.url}: {exc}")
+                    return None
+                if not filename:
+                    return None
+                candidates = [filename]
+                if self.info.format in AUDIO_FORMATS:
+                    base, _ = os.path.splitext(filename)
+                    candidates.append(base + '.' + self.info.format)
+                for candidate in candidates:
+                    if os.path.exists(candidate):
+                        return candidate
+                return None
+
+            if getattr(self.info, 'skip_existing_downloads', False):
+                existing_path = find_existing_path()
+                if existing_path:
+                    log.info(f"Skipping download; file already exists at {existing_path}")
+                    self.status_queue.put({'status': 'finished', 'filename': existing_path})
+                    return
+
+            def is_403_error(exc):
+                msg = str(exc).lower()
+                return "http error 403" in msg or "403 forbidden" in msg or "error 403" in msg or " 403" in msg
+
+            def retry_delay(attempt):
+                schedule = [2, 5, 8, 13, 21]
+                if attempt < len(schedule):
+                    return schedule[attempt]
+                return schedule[-1] + 5 * (attempt - len(schedule) + 1)
+
+            try:
+                max_retries = int(getattr(self.info, 'retry_403_max', 0) or 0)
+            except (TypeError, ValueError):
+                max_retries = 0
+            max_retries = max(0, max_retries)
+            attempt = 0
+
+            while True:
+                try:
+                    ret = yt_dlp.YoutubeDL(params=ytdl_params).download([self.info.url])
+                    self.status_queue.put({'status': 'finished' if ret == 0 else 'error'})
+                    log.info(f"Finished download for: {self.info.title}")
+                    return
+                except yt_dlp.utils.YoutubeDLError as exc:
+                    if is_403_error(exc) and attempt < max_retries:
+                        delay = retry_delay(attempt)
+                        attempt += 1
+                        log.warning(f"HTTP 403 for {self.info.title}. Retrying {attempt}/{max_retries} in {delay}s.")
+                        time.sleep(delay)
+                        continue
+                    log.error(f"Download error for {self.info.title}: {str(exc)}")
+                    self.status_queue.put({'status': 'error', 'msg': str(exc)})
+                    return
+        except Exception as exc:
+            log.error(f"Unexpected download error for {self.info.title}: {str(exc)}")
             self.status_queue.put({'status': 'error', 'msg': str(exc)})
 
     async def start(self, notifier):
@@ -306,6 +374,7 @@ class PersistentQueue:
 
     def load(self):
         for k, v in self.saved_items():
+            _ensure_download_id(v, k)
             self.dict[k] = Download(None, None, None, None, None, None, {}, v)
 
     def exists(self, key):
@@ -319,10 +388,13 @@ class PersistentQueue:
 
     def saved_items(self):
         with shelve.open(self.path, 'r') as shelf:
-            return sorted(shelf.items(), key=lambda item: item[1].timestamp)
+            items = list(shelf.items())
+        for k, v in items:
+            _ensure_download_id(v, k)
+        return sorted(items, key=lambda item: item[1].timestamp)
 
     def put(self, value):
-        key = value.info.url
+        key = _ensure_download_id(value.info, value.info.url)
         self.dict[key] = value
         with shelve.open(self.path, 'w') as shelf:
             shelf[key] = value.info
@@ -407,7 +479,7 @@ class PersistentQueue:
                     log.debug(f"{log_prefix} failed: {result.stderr}")
                 else:
                     shutil.move(f"{self.path}.tmp", self.path)
-                    log.debug(f"{log_prefix}{result.stdout or " was successful, no output"}")
+                    log.debug(f"{log_prefix}{result.stdout or ' was successful, no output'}")
             except FileNotFoundError:
                 log.debug(f"{log_prefix} failed: 'sqlite3' was not found")
 
@@ -415,6 +487,7 @@ class DownloadQueue:
     def __init__(self, config, notifier):
         self.config = config
         self.notifier = notifier
+        self.retry_403_max = self._parse_retry_403_max()
         self.queue = PersistentQueue("queue", self.config.STATE_DIR + '/queue')
         self.done = PersistentQueue("completed", self.config.STATE_DIR + '/completed')
         self.pending = PersistentQueue("pending", self.config.STATE_DIR + '/pending')
@@ -422,12 +495,36 @@ class DownloadQueue:
         self.semaphore = asyncio.Semaphore(int(self.config.MAX_CONCURRENT_DOWNLOADS))
         self.done.load()
 
+    def _parse_retry_403_max(self):
+        try:
+            value = int(self.config.RETRY_403_MAX)
+        except (TypeError, ValueError):
+            log.warning(f'Invalid RETRY_403_MAX value "{self.config.RETRY_403_MAX}", defaulting to 0')
+            return 0
+        return max(0, value)
+
+    def _has_playlist_entry(self, playlist_id, entry_id):
+        if not entry_id:
+            return False
+        playlist_key = playlist_id or ''
+        for _, dl in list(self.queue.items()) + list(self.pending.items()) + list(self.done.items()):
+            entry = getattr(dl.info, 'entry', None)
+            if not isinstance(entry, dict):
+                continue
+            existing_playlist_id = entry.get('playlist') or entry.get('playlist_id') or ''
+            existing_entry_id = entry.get('id')
+            if existing_playlist_id == playlist_key and existing_entry_id == entry_id:
+                return True
+        return False
+
     async def __import_queue(self):
         for k, v in self.queue.saved_items():
+            _ensure_download_id(v, k)
             await self.__add_download(v, True)
 
     async def __import_pending(self):
         for k, v in self.pending.saved_items():
+            _ensure_download_id(v, k)
             await self.__add_download(v, False)
 
     async def initialize(self):
@@ -455,10 +552,11 @@ class DownloadQueue:
                     pass
             download.info.status = 'error'
         download.close()
-        if self.queue.exists(download.info.url):
-            self.queue.delete(download.info.url)
+        dl_key = _ensure_download_id(download.info, download.info.url)
+        if self.queue.exists(dl_key):
+            self.queue.delete(dl_key)
             if download.canceled:
-                asyncio.create_task(self.notifier.canceled(download.info.url))
+                asyncio.create_task(self.notifier.canceled(dl_key))
             else:
                 self.done.put(download)
                 asyncio.create_task(self.notifier.completed(download.info))
@@ -495,6 +593,10 @@ class DownloadQueue:
         return dldirectory, None
 
     async def __add_download(self, dl, auto_start):
+        if not hasattr(dl, 'skip_existing_downloads'):
+            dl.skip_existing_downloads = self.config.SKIP_EXISTING_DOWNLOADS
+        if not hasattr(dl, 'retry_403_max'):
+            dl.retry_403_max = self.retry_403_max
         dldirectory, error_message = self.__calc_download_path(dl.quality, dl.format, dl.folder)
         if error_message is not None:
             return error_message
@@ -572,8 +674,13 @@ class DownloadQueue:
         elif etype == 'video' or (etype.startswith('url') and 'id' in entry and 'title' in entry):
             log.debug('Processing as a video')
             key = entry.get('webpage_url') or entry['url']
-            if not self.queue.exists(key):
-                dl = DownloadInfo(entry['id'], entry.get('title') or entry['id'], key, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template)
+            entry_id = entry.get('id')
+            playlist_id = entry.get('playlist') or entry.get('playlist_id')
+            if entry_id and self._has_playlist_entry(playlist_id, entry_id):
+                log.info(f'Skipping duplicate playlist entry: {entry_id} in playlist {playlist_id or "none"}')
+                return {'status': 'ok'}
+            if not any(dl.info.url == key for _, dl in self.queue.items()):
+                dl = DownloadInfo(entry['id'], entry.get('title') or entry['id'], key, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template, self.config.SKIP_EXISTING_DOWNLOADS, self.retry_403_max)
                 await self.__add_download(dl, auto_start)
             return {'status': 'ok'}
         return {'status': 'error', 'msg': f'Unsupported resource "{etype}"'}

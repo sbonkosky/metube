@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MeTube DB Browser</title>
+    <style>
+      :root {
+        --bg: #f6f4ef;
+        --bg-accent: #e2ede7;
+        --ink: #1d2b2f;
+        --muted: #516168;
+        --accent: #0b6b6f;
+        --accent-strong: #0a5356;
+        --card: #ffffff;
+        --line: #cfd8d1;
+        --shadow: rgba(18, 28, 30, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Trebuchet MS", "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(1200px 600px at 10% -10%, #f7e9d3 0, transparent 60%),
+          radial-gradient(900px 500px at 100% 0%, #d6e7f5 0, transparent 55%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-accent) 100%);
+        min-height: 100vh;
+      }
+
+      main {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 32px 24px 48px;
+      }
+
+      .mast {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 20px 24px;
+        background: var(--card);
+        border-radius: 18px;
+        box-shadow: 0 18px 40px var(--shadow);
+        border: 1px solid rgba(255, 255, 255, 0.6);
+      }
+
+      .mast h1 {
+        font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+        margin: 0 0 6px;
+        font-size: 28px;
+        letter-spacing: 0.5px;
+      }
+
+      .mast p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        appearance: none;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #ffffff;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 16px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+        box-shadow: 0 8px 16px rgba(11, 107, 111, 0.25);
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        background: var(--accent-strong);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        background: #b9c5c4;
+        box-shadow: none;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin: 20px 0;
+      }
+
+      .filters {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        background: rgba(255, 255, 255, 0.75);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px 16px;
+        box-shadow: 0 12px 28px var(--shadow);
+        margin-bottom: 20px;
+      }
+
+      .filters label {
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .filters input[type="search"] {
+        flex: 1;
+        min-width: 240px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        padding: 10px 14px;
+        font-size: 13px;
+        font-family: "Trebuchet MS", "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+        background: #ffffff;
+        color: var(--ink);
+        outline: none;
+      }
+
+      .filters input[type="search"]:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(11, 107, 111, 0.2);
+      }
+
+      .stat {
+        background: rgba(255, 255, 255, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.9);
+        padding: 12px 16px;
+        border-radius: 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .stat span {
+        display: block;
+        font-size: 18px;
+        font-weight: 700;
+        color: var(--ink);
+        margin-top: 4px;
+      }
+
+      .table-wrap {
+        background: var(--card);
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        box-shadow: 0 18px 40px var(--shadow);
+        overflow: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        min-width: 1200px;
+      }
+
+      thead th {
+        position: sticky;
+        top: 0;
+        background: #f4f7f5;
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      thead th.sortable::after {
+        content: " ";
+        display: inline-block;
+        margin-left: 6px;
+        border: 5px solid transparent;
+        border-top-color: #9aa8a6;
+        transform: translateY(2px);
+      }
+
+      thead th.sortable[data-dir="asc"]::after {
+        border-top-color: transparent;
+        border-bottom-color: #0b6b6f;
+        transform: translateY(-2px);
+      }
+
+      thead th.sortable[data-dir="desc"]::after {
+        border-top-color: #0b6b6f;
+      }
+
+      tbody td {
+        border-bottom: 1px solid #edf0ee;
+        padding: 10px 12px;
+        vertical-align: top;
+        color: var(--ink);
+      }
+
+      tbody tr:hover {
+        background: #f3f7f5;
+      }
+
+      td.json {
+        white-space: pre-wrap;
+        font-family: "Menlo", "Consolas", "Liberation Mono", monospace;
+        font-size: 12px;
+        color: #2b3d42;
+      }
+
+      .entry-link {
+        border: 1px solid #b9c5c4;
+        background: #ffffff;
+        color: var(--accent);
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 999px;
+        cursor: pointer;
+        box-shadow: none;
+      }
+
+      .entry-link:hover {
+        background: #eef5f3;
+        color: var(--accent-strong);
+      }
+
+      td.muted {
+        color: #94a1a5;
+      }
+
+      .select-cell {
+        width: 36px;
+      }
+
+      .status {
+        margin-top: 16px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(12, 18, 20, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        z-index: 50;
+      }
+
+      .modal.hidden {
+        display: none;
+      }
+
+      .modal-card {
+        background: var(--card);
+        border-radius: 18px;
+        max-width: 960px;
+        width: 100%;
+        max-height: 80vh;
+        overflow: auto;
+        box-shadow: 0 24px 60px rgba(10, 20, 23, 0.35);
+        border: 1px solid var(--line);
+      }
+
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--line);
+        background: #f7f7f4;
+      }
+
+      .modal-header h2 {
+        margin: 0;
+        font-size: 16px;
+        letter-spacing: 0.3px;
+      }
+
+      .modal-close {
+        border: 1px solid #b9c5c4;
+        background: #ffffff;
+        color: var(--ink);
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 999px;
+        cursor: pointer;
+        box-shadow: none;
+      }
+
+      .modal-close:hover {
+        background: #f0f4f2;
+      }
+
+      .modal pre {
+        margin: 0;
+        padding: 16px 18px 20px;
+        white-space: pre-wrap;
+        font-family: "Menlo", "Consolas", "Liberation Mono", monospace;
+        font-size: 12px;
+        color: #2b3d42;
+      }
+
+      @media (max-width: 900px) {
+        main {
+          padding: 24px 16px 40px;
+        }
+
+        .mast {
+          border-radius: 14px;
+        }
+
+        table {
+          font-size: 12px;
+        }
+
+        thead th,
+        tbody td {
+          padding: 8px 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="mast">
+        <div>
+          <h1>DB Browser</h1>
+          <p>Browse queue data stored in STATE_DIR. Use sorting and multi-select to delete rows.</p>
+        </div>
+        <div class="actions">
+          <button id="refresh">Refresh</button>
+          <button id="delete" disabled>Delete selected</button>
+        </div>
+      </header>
+
+      <section class="stats">
+        <div class="stat">Rows shown<span id="total">0</span></div>
+        <div class="stat">Selected<span id="selected">0</span></div>
+        <div class="stat">Last load<span id="loaded">-</span></div>
+      </section>
+
+      <section class="filters">
+        <label for="playlist-filter">Playlist filter</label>
+        <input id="playlist-filter" type="search" placeholder="Filter by playlist title" autocomplete="off">
+      </section>
+
+      <section class="table-wrap">
+        <table id="db-table">
+          <thead>
+            <tr id="header-row">
+              <th class="select-cell">
+                <input id="select-all" type="checkbox" aria-label="Select all rows">
+              </th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <div id="status" class="status" role="status"></div>
+    </main>
+
+    <div id="entry-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="entry-title">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="entry-title">Entry JSON</h2>
+          <button id="modal-close" class="modal-close" type="button">Close</button>
+        </div>
+        <pre id="entry-json"></pre>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        rows: [],
+        columns: [],
+        sortKey: "timestamp",
+        sortDir: "desc",
+        playlistFilter: "",
+      };
+
+      const elements = {
+        table: document.getElementById("db-table"),
+        headerRow: document.getElementById("header-row"),
+        tbody: document.querySelector("#db-table tbody"),
+        status: document.getElementById("status"),
+        total: document.getElementById("total"),
+        selected: document.getElementById("selected"),
+        loaded: document.getElementById("loaded"),
+        refresh: document.getElementById("refresh"),
+        delete: document.getElementById("delete"),
+        selectAll: document.getElementById("select-all"),
+        playlistFilter: document.getElementById("playlist-filter"),
+        modal: document.getElementById("entry-modal"),
+        modalClose: document.getElementById("modal-close"),
+        modalJson: document.getElementById("entry-json"),
+      };
+
+      function basePath() {
+        const path = window.location.pathname;
+        const idx = path.lastIndexOf("/db");
+        if (idx === -1) {
+          return "/";
+        }
+        return path.slice(0, idx) + "/";
+      }
+
+      function formatValue(value) {
+        if (value === null || value === undefined) {
+          return { text: "", isJson: false, muted: true };
+        }
+        if (typeof value === "object") {
+          return { text: JSON.stringify(value, null, 2), isJson: true, muted: false };
+        }
+        return { text: String(value), isJson: false, muted: false };
+      }
+
+      function buildColumns(rows) {
+        const keys = new Set();
+        rows.forEach((row) => {
+          Object.keys(row).forEach((key) => keys.add(key));
+        });
+
+        const preferred = ["entry", "where", "url", "title", "status", "filename", "size", "timestamp"];
+        const ordered = [];
+        preferred.forEach((key) => {
+          if (keys.has(key)) {
+            ordered.push(key);
+            keys.delete(key);
+          }
+        });
+
+        const tail = [];
+        if (keys.has("chapter_files")) {
+          tail.push("chapter_files");
+          keys.delete("chapter_files");
+        }
+        const rest = Array.from(keys).sort();
+        return ordered.concat(rest, tail);
+      }
+
+      function sortableValue(value) {
+        if (value === null || value === undefined) {
+          return { type: "null", value: "" };
+        }
+        if (typeof value === "number") {
+          return { type: "number", value };
+        }
+        if (typeof value === "boolean") {
+          return { type: "number", value: value ? 1 : 0 };
+        }
+        const text = typeof value === "string" ? value : JSON.stringify(value);
+        const num = Number(text);
+        if (!Number.isNaN(num) && String(text).trim() !== "") {
+          return { type: "number", value: num };
+        }
+        return { type: "string", value: text.toLowerCase() };
+      }
+
+      function playlistName(row) {
+        return row.entry_playlist_title || row.entry_playlist || row.entry_playlist_id || "";
+      }
+
+      function filterRows(rows) {
+        const term = state.playlistFilter.trim().toLowerCase();
+        if (!term) {
+          return rows;
+        }
+        return rows.filter((row) => {
+          const name = playlistName(row);
+          if (!name) {
+            return false;
+          }
+          return String(name).toLowerCase().includes(term);
+        });
+      }
+
+      function sortRows(rows) {
+        const key = state.sortKey;
+        const dir = state.sortDir === "asc" ? 1 : -1;
+        return rows
+          .map((row, index) => ({ row, index }))
+          .sort((a, b) => {
+            const av = sortableValue(a.row[key]);
+            const bv = sortableValue(b.row[key]);
+            if (av.type === "null" && bv.type !== "null") return 1;
+            if (bv.type === "null" && av.type !== "null") return -1;
+            if (av.value < bv.value) return -1 * dir;
+            if (av.value > bv.value) return 1 * dir;
+            return a.index - b.index;
+          })
+          .map((item) => item.row);
+      }
+
+      function updateSelectionCount() {
+        const selected = elements.tbody.querySelectorAll("input[type=checkbox]:checked").length;
+        elements.selected.textContent = String(selected);
+        elements.delete.disabled = selected === 0;
+      }
+
+      function updateStatusMessage(visibleCount) {
+        const total = state.rows.length;
+        const term = state.playlistFilter.trim();
+        if (term) {
+          elements.status.textContent = `Showing ${visibleCount} of ${total} rows for playlist "${term}".`;
+        } else {
+          elements.status.textContent = `Loaded ${total} rows.`;
+        }
+      }
+
+      function renderHeader() {
+        elements.headerRow.innerHTML = "";
+        const selectTh = document.createElement("th");
+        selectTh.className = "select-cell";
+        const selectInput = document.createElement("input");
+        selectInput.type = "checkbox";
+        selectInput.id = "select-all";
+        selectInput.setAttribute("aria-label", "Select all rows");
+        selectTh.appendChild(selectInput);
+        elements.headerRow.appendChild(selectTh);
+
+        state.columns.forEach((col) => {
+          const th = document.createElement("th");
+          th.textContent = col;
+          th.classList.add("sortable");
+          th.dataset.key = col;
+          if (state.sortKey === col) {
+            th.dataset.dir = state.sortDir;
+          }
+          elements.headerRow.appendChild(th);
+        });
+
+        elements.selectAll = selectInput;
+        elements.selectAll.addEventListener("change", () => {
+          const rows = elements.tbody.querySelectorAll("input[type=checkbox]");
+          rows.forEach((box) => {
+            box.checked = elements.selectAll.checked;
+          });
+          updateSelectionCount();
+        });
+      }
+
+      function renderRows() {
+        elements.tbody.innerHTML = "";
+        const filtered = filterRows(state.rows);
+        const rows = sortRows(filtered);
+        const fragment = document.createDocumentFragment();
+
+        rows.forEach((row) => {
+          const tr = document.createElement("tr");
+          tr.dataset.where = row.where || "";
+          tr.dataset.id = row.download_id || row.url || "";
+
+          const selectTd = document.createElement("td");
+          selectTd.className = "select-cell";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.addEventListener("change", updateSelectionCount);
+          selectTd.appendChild(checkbox);
+          tr.appendChild(selectTd);
+
+          state.columns.forEach((col) => {
+            const td = document.createElement("td");
+            if (col === "entry") {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.className = "entry-link";
+              button.textContent = "View JSON";
+              button.addEventListener("click", () => {
+                const entryValue = row.entry || {};
+                elements.modalJson.textContent = JSON.stringify(entryValue, null, 2);
+                elements.modal.classList.remove("hidden");
+              });
+              td.appendChild(button);
+            } else {
+              const formatted = formatValue(row[col]);
+              if (formatted.isJson) {
+                td.classList.add("json");
+              }
+              if (formatted.muted) {
+                td.classList.add("muted");
+              }
+              td.textContent = formatted.text;
+            }
+            tr.appendChild(td);
+          });
+
+          fragment.appendChild(tr);
+        });
+
+        elements.tbody.appendChild(fragment);
+        elements.total.textContent = String(filtered.length);
+        updateSelectionCount();
+        updateStatusMessage(filtered.length);
+      }
+
+      function render() {
+        renderHeader();
+        renderRows();
+
+        const headers = elements.headerRow.querySelectorAll("th.sortable");
+        headers.forEach((th) => {
+          th.addEventListener("click", () => {
+            const key = th.dataset.key;
+            if (state.sortKey === key) {
+              state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+            } else {
+              state.sortKey = key;
+              state.sortDir = "asc";
+            }
+            render();
+          });
+        });
+      }
+
+      async function loadData() {
+        elements.status.textContent = "Loading data...";
+        try {
+          const response = await fetch(basePath() + "history");
+          const text = await response.text();
+          const data = JSON.parse(text);
+          const rows = [];
+          ["queue", "pending", "done"].forEach((key) => {
+            const items = data[key] || [];
+            items.forEach((item) => {
+              const row = { ...item, where: key };
+              row.download_id = row.download_id || row.url;
+              if (item && typeof item.entry === "object" && item.entry !== null) {
+                Object.keys(item.entry).forEach((entryKey) => {
+                  if (entryKey.startsWith("playlist")) {
+                    row["entry_" + entryKey] = item.entry[entryKey];
+                  }
+                });
+              }
+              rows.push(row);
+            });
+          });
+          state.rows = rows;
+          state.columns = buildColumns(rows);
+          render();
+          elements.loaded.textContent = new Date().toLocaleString();
+        } catch (error) {
+          elements.status.textContent = "Failed to load data: " + error;
+        }
+      }
+
+      async function deleteSelected() {
+        const selectedRows = Array.from(elements.tbody.querySelectorAll("tr")).filter((row) => {
+          const box = row.querySelector("input[type=checkbox]");
+          return box && box.checked;
+        });
+
+        if (selectedRows.length === 0) {
+          return;
+        }
+
+        const confirmDelete = window.confirm("Delete " + selectedRows.length + " rows?");
+        if (!confirmDelete) {
+          return;
+        }
+
+        const groups = { queue: [], done: [] };
+        selectedRows.forEach((row) => {
+          const id = row.dataset.id;
+          const where = row.dataset.where;
+          if (!id) {
+            return;
+          }
+          if (where === "done") {
+            groups.done.push(id);
+          } else {
+            groups.queue.push(id);
+          }
+        });
+
+        const base = basePath();
+        const requests = [];
+        if (groups.queue.length > 0) {
+          requests.push(fetch(base + "delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: groups.queue, where: "queue" }),
+          }));
+        }
+        if (groups.done.length > 0) {
+          requests.push(fetch(base + "delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: groups.done, where: "done" }),
+          }));
+        }
+
+        try {
+          await Promise.all(requests);
+          await loadData();
+        } catch (error) {
+          elements.status.textContent = "Delete failed: " + error;
+        }
+      }
+
+      elements.refresh.addEventListener("click", loadData);
+      elements.delete.addEventListener("click", deleteSelected);
+      elements.playlistFilter.addEventListener("input", (event) => {
+        state.playlistFilter = event.target.value || "";
+        render();
+      });
+      elements.modalClose.addEventListener("click", () => {
+        elements.modal.classList.add("hidden");
+      });
+      elements.modal.addEventListener("click", (event) => {
+        if (event.target === elements.modal) {
+          elements.modal.classList.add("hidden");
+        }
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !elements.modal.classList.contains("hidden")) {
+          elements.modal.classList.add("hidden");
+        }
+      });
+
+      loadData();
+    </script>
+  </body>
+</html>

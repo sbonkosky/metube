@@ -25,6 +25,10 @@ export class DownloadsService {
   configuration: any = {};
   customDirs = {};
 
+  private downloadKey(data: Download): string {
+    return data.download_id ?? data.url;
+  }
+
   constructor() {
     this.socket.fromEvent('all')
     .pipe(takeUntilDestroyed())
@@ -42,25 +46,27 @@ export class DownloadsService {
     .pipe(takeUntilDestroyed())
     .subscribe((strdata: string) => {
       const data: Download = JSON.parse(strdata);
-      this.queue.set(data.url, data);
+      this.queue.set(this.downloadKey(data), data);
       this.queueChanged.next(null);
     });
     this.socket.fromEvent('updated')
     .pipe(takeUntilDestroyed())
     .subscribe((strdata: string) => {
       const data: Download = JSON.parse(strdata);
-      const dl: Download | undefined  = this.queue.get(data.url);
+      const key = this.downloadKey(data);
+      const dl: Download | undefined  = this.queue.get(key);
       data.checked = !!dl?.checked;
       data.deleting = !!dl?.deleting;
-      this.queue.set(data.url, data);
+      this.queue.set(key, data);
       this.updated.next(null);
     });
     this.socket.fromEvent('completed')
     .pipe(takeUntilDestroyed())
     .subscribe((strdata: string) => {
       const data: Download = JSON.parse(strdata);
-      this.queue.delete(data.url);
-      this.done.set(data.url, data);
+      const key = this.downloadKey(data);
+      this.queue.delete(key);
+      this.done.set(key, data);
       this.queueChanged.next(null);
       this.doneChanged.next(null);
     });
@@ -132,13 +138,13 @@ export class DownloadsService {
 
   public startByFilter(where: State, filter: (dl: Download) => boolean) {
     const ids: string[] = [];
-    this[where].forEach((dl: Download) => { if (filter(dl)) ids.push(dl.url) });
+    this[where].forEach((dl: Download) => { if (filter(dl)) ids.push(this.downloadKey(dl)) });
     return this.startById(ids);
   }
 
   public delByFilter(where: State, filter: (dl: Download) => boolean) {
     const ids: string[] = [];
-    this[where].forEach((dl: Download) => { if (filter(dl)) ids.push(dl.url) });
+    this[where].forEach((dl: Download) => { if (filter(dl)) ids.push(this.downloadKey(dl)) });
     return this.delById(where, ids);
   }
   public addDownloadByUrl(url: string): Promise<{

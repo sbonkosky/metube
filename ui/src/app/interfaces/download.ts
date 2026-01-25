@@ -1,5 +1,6 @@
 
 export interface Download {
+  download_id?: string;
   id: string;
   title: string;
   url: string;

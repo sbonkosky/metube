@@ -37,6 +37,8 @@ Certain values can be set via environment variables, using the `-e` parameter on
 * __DELETE_FILE_ON_TRASHCAN__: if `true`, downloaded files are deleted on the server, when they are trashed from the "Completed" section of the UI. Defaults to `false`.
 * __DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT__: Maximum number of playlist items that can be downloaded. Defaults to `0` (no limit).
 * __PLAYLIST_ITEMS_OLDEST_FIRST__: If `true`, playlist entries are processed oldest to newest (newest items last). Defaults to `false`.
+* __SKIP_EXISTING_DOWNLOADS__: If `true`, skip downloads when the target file already exists on disk (the DB entry is still created). Defaults to `false`.
+* __RETRY_403_MAX__: Number of retry attempts for HTTP 403 errors during download. Defaults to `0`.
 
 ### 📁 Storage & Directories
 
@@ -109,6 +111,10 @@ In case you need to use your browser's cookies with MeTube, for example to downl
 ## 🔌 Browser extensions
 
 Browser extensions allow right-clicking videos and sending them directly to MeTube. Please note that if you're on an HTTPS page, your MeTube instance must be behind an HTTPS reverse proxy (see below) for the extensions to work.
+
+## 🧰 Database browser
+
+You can browse the persisted queue data at `/db` (for example, `http://localhost:8081/db`). The page lists all queue, pending, and completed rows, supports column sorting, and lets you delete selected rows.
 
 __Chrome:__ contributed by [Rpsl](https://github.com/rpsl). You can install it from [Google Chrome Webstore](https://chrome.google.com/webstore/detail/metube-downloader/fbmkmdnlhacefjljljlbhkodfmfkijdh) or use developer mode and install [from sources](https://github.com/Rpsl/metube-browser-extension).
 
