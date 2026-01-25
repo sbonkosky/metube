@@ -123,7 +123,8 @@
         font-weight: 700;
       }
 
-      .filters input[type="search"] {
+      .filters input[type="search"],
+      .filters select {
         flex: 1;
         min-width: 240px;
         border-radius: 999px;
@@ -136,7 +137,8 @@
         outline: none;
       }
 
-      .filters input[type="search"]:focus {
+      .filters input[type="search"]:focus,
+      .filters select:focus {
         border-color: var(--accent);
         box-shadow: 0 0 0 2px rgba(11, 107, 111, 0.2);
       }
@@ -358,6 +360,15 @@
       <section class="filters">
         <label for="playlist-filter">Playlist filter</label>
         <input id="playlist-filter" type="search" placeholder="Filter by playlist title" autocomplete="off">
+        <label for="status-filter">Status</label>
+        <select id="status-filter">
+          <option value="">All statuses</option>
+          <option value="pending">pending</option>
+          <option value="preparing">preparing</option>
+          <option value="downloading">downloading</option>
+          <option value="finished">finished</option>
+          <option value="error">error</option>
+        </select>
       </section>
 
       <section class="table-wrap">
@@ -393,6 +404,7 @@
         sortKey: "timestamp",
         sortDir: "desc",
         playlistFilter: "",
+        statusFilter: "",
       };
 
       const elements = {
@@ -407,6 +419,7 @@
         delete: document.getElementById("delete"),
         selectAll: document.getElementById("select-all"),
         playlistFilter: document.getElementById("playlist-filter"),
+        statusFilter: document.getElementById("status-filter"),
         modal: document.getElementById("entry-modal"),
         modalClose: document.getElementById("modal-close"),
         modalJson: document.getElementById("entry-json"),
@@ -479,15 +492,19 @@
 
       function filterRows(rows) {
         const term = state.playlistFilter.trim().toLowerCase();
-        if (!term) {
-          return rows;
-        }
+        const statusTerm = state.statusFilter.trim().toLowerCase();
         return rows.filter((row) => {
-          const name = playlistName(row);
-          if (!name) {
+          const matchesPlaylist = !term || (() => {
+            const name = playlistName(row);
+            return name && String(name).toLowerCase().includes(term);
+          })();
+          if (!matchesPlaylist) {
             return false;
           }
-          return String(name).toLowerCase().includes(term);
+          if (!statusTerm) {
+            return true;
+          }
+          return String(row.status || "").toLowerCase() === statusTerm;
         });
       }
 
@@ -517,8 +534,16 @@
       function updateStatusMessage(visibleCount) {
         const total = state.rows.length;
         const term = state.playlistFilter.trim();
-        if (term) {
-          elements.status.textContent = `Showing ${visibleCount} of ${total} rows for playlist "${term}".`;
+        const statusTerm = state.statusFilter.trim();
+        if (term || statusTerm) {
+          const pieces = [];
+          if (term) {
+            pieces.push(`playlist "${term}"`);
+          }
+          if (statusTerm) {
+            pieces.push(`status "${statusTerm}"`);
+          }
+          elements.status.textContent = `Showing ${visibleCount} of ${total} rows for ${pieces.join(" and ")}.`;
         } else {
           elements.status.textContent = `Loaded ${total} rows.`;
         }
@@ -718,6 +743,10 @@
       elements.delete.addEventListener("click", deleteSelected);
       elements.playlistFilter.addEventListener("input", (event) => {
         state.playlistFilter = event.target.value || "";
+        render();
+      });
+      elements.statusFilter.addEventListener("change", (event) => {
+        state.statusFilter = event.target.value || "";
         render();
       });
       elements.modalClose.addEventListener("click", () => {
