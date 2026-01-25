@@ -299,7 +299,7 @@ export class App implements AfterViewInit, OnInit {
   }
 }
 
-  addDownload(url?: string, quality?: string, format?: string, folder?: string, customNamePrefix?: string, playlistItemLimit?: number, autoStart?: boolean, splitByChapters?: boolean, chapterTemplate?: string) {
+  addDownload(url?: string, quality?: string, format?: string, folder?: string, customNamePrefix?: string, playlistItemLimit?: number, autoStart?: boolean, splitByChapters?: boolean, chapterTemplate?: string, entry?: Record<string, unknown>) {
     url = url ?? this.addUrl
     quality = quality ?? this.quality
     format = format ?? this.format
@@ -318,7 +318,7 @@ export class App implements AfterViewInit, OnInit {
 
     console.debug('Downloading: url=' + url + ' quality=' + quality + ' format=' + format + ' folder=' + folder + ' customNamePrefix=' + customNamePrefix + ' playlistItemLimit=' + playlistItemLimit + ' autoStart=' + autoStart + ' splitByChapters=' + splitByChapters + ' chapterTemplate=' + chapterTemplate);
     this.addInProgress = true;
-    this.downloads.add(url, quality, format, folder, customNamePrefix, playlistItemLimit, autoStart, splitByChapters, chapterTemplate).subscribe((status: Status) => {
+    this.downloads.add(url, quality, format, folder, customNamePrefix, playlistItemLimit, autoStart, splitByChapters, chapterTemplate, entry).subscribe((status: Status) => {
       if (status.status === 'error') {
         alert(`Error adding URL: ${status.msg}`);
       } else {
@@ -333,8 +333,15 @@ export class App implements AfterViewInit, OnInit {
   }
 
   retryDownload(key: string, download: Download) {
-    this.addDownload(download.url, download.quality, download.format, download.folder, download.custom_name_prefix, download.playlist_item_limit, true, download.split_by_chapters, download.chapter_template);
-    this.downloads.delById('done', [key]).subscribe();
+    const entry = download.entry;
+    this.downloads.delById('done', [key]).subscribe({
+      next: () => {
+        this.addDownload(download.url, download.quality, download.format, download.folder, download.custom_name_prefix, download.playlist_item_limit, true, download.split_by_chapters, download.chapter_template, entry);
+      },
+      error: () => {
+        alert('Retry failed: could not delete the existing entry.');
+      }
+    });
   }
 
   delDownload(where: State, id: string) {

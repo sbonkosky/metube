@@ -113,8 +113,22 @@ export class DownloadsService {
     return of({status: 'error', msg: msg})
   }
 
-  public add(url: string, quality: string, format: string, folder: string, customNamePrefix: string, playlistItemLimit: number, autoStart: boolean, splitByChapters: boolean, chapterTemplate: string) {
-    return this.http.post<Status>('add', { url: url, quality: quality, format: format, folder: folder, custom_name_prefix: customNamePrefix, playlist_item_limit: playlistItemLimit, auto_start: autoStart, split_by_chapters: splitByChapters, chapter_template: chapterTemplate }).pipe(
+  public add(url: string, quality: string, format: string, folder: string, customNamePrefix: string, playlistItemLimit: number, autoStart: boolean, splitByChapters: boolean, chapterTemplate: string, entry?: Record<string, unknown>) {
+    const payload: Record<string, unknown> = {
+      url: url,
+      quality: quality,
+      format: format,
+      folder: folder,
+      custom_name_prefix: customNamePrefix,
+      playlist_item_limit: playlistItemLimit,
+      auto_start: autoStart,
+      split_by_chapters: splitByChapters,
+      chapter_template: chapterTemplate,
+    };
+    if (entry) {
+      payload.entry = entry;
+    }
+    return this.http.post<Status>('add', payload).pipe(
       catchError(this.handleHTTPError)
     );
   }

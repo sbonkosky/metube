@@ -721,14 +721,19 @@ class DownloadQueue:
             return {'status': 'ok'}
         return {'status': 'error', 'msg': f'Unsupported resource "{etype}"'}
 
-    async def add(self, url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start=True, split_by_chapters=False, chapter_template=None, already=None):
-        log.info(f'adding {url}: {quality=} {format=} {already=} {folder=} {custom_name_prefix=} {playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=}')
+    async def add(self, url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start=True, split_by_chapters=False, chapter_template=None, already=None, entry_override=None):
+        log.info(f'adding {url}: {quality=} {format=} {already=} {folder=} {custom_name_prefix=} {playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=} {entry_override is not None=}')
         already = set() if already is None else already
         if url in already:
             log.info('recursion detected, skipping')
             return {'status': 'ok'}
         else:
             already.add(url)
+        if isinstance(entry_override, dict):
+            entry = dict(entry_override)
+            if '_type' not in entry:
+                entry['_type'] = 'video'
+            return await self.__add_entry(entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already)
         try:
             entry = await asyncio.get_running_loop().run_in_executor(None, self.__extract_info, url)
         except yt_dlp.utils.YoutubeDLError as exc:

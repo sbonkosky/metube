@@ -1,6 +1,7 @@
 
 export interface Download {
   download_id?: string;
+  entry?: Record<string, unknown>;
   id: string;
   title: string;
   url: string;

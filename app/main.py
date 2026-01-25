@@ -304,6 +304,9 @@ async def add(request):
     auto_start = post.get('auto_start')
     split_by_chapters = post.get('split_by_chapters')
     chapter_template = post.get('chapter_template')
+    entry_override = post.get('entry')
+    if entry_override is not None and not isinstance(entry_override, dict):
+        entry_override = None
 
     if custom_name_prefix is None:
         custom_name_prefix = ''
@@ -318,7 +321,7 @@ async def add(request):
 
     playlist_item_limit = int(playlist_item_limit)
 
-    status = await dqueue.add(url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template)
+    status = await dqueue.add(url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, entry_override)
     return web.Response(text=serializer.encode(status))
 
 @routes.post(config.URL_PREFIX + 'delete')
