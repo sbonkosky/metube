@@ -93,7 +93,7 @@ class DownloadQueueNotifier:
         raise NotImplementedError
 
 class DownloadInfo:
-    def __init__(self, id, title, url, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template, skip_existing_downloads=False, retry_403_max=0):
+    def __init__(self, id, title, url, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template, skip_existing_downloads=False, retry_403_max=0, cookiefile_fallback=None):
         self.id = id if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{id}'
         self.title = title if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{title}'
         self.url = url
@@ -108,6 +108,7 @@ class DownloadInfo:
         self.download_id = uuid.uuid4().hex
         self.skip_existing_downloads = skip_existing_downloads
         self.retry_403_max = retry_403_max
+        self.cookiefile_fallback = cookiefile_fallback
         self.error = error
         # Convert generators to lists to make entry pickleable
         self.entry = _convert_generators_to_lists(entry) if entry is not None else None
@@ -130,6 +131,7 @@ class Download:
         if "impersonate" in self.ytdl_opts:
             self.ytdl_opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.ytdl_opts["impersonate"])
         self.info = info
+        self.cookiefile_fallback = getattr(info, 'cookiefile_fallback', None)
         self.canceled = False
         self.tmpfilename = None
         self.status_queue = None
@@ -238,6 +240,9 @@ class Download:
                 msg = str(exc).lower()
                 return "http error 403" in msg or "403 forbidden" in msg or "error 403" in msg or " 403" in msg
 
+            def is_no_formats_error(exc):
+                return "no video formats found" in str(exc).lower()
+
             def retry_delay(attempt):
                 schedule = [2, 5, 8, 13, 21]
                 if attempt < len(schedule):
@@ -250,6 +255,7 @@ class Download:
                 max_retries = 0
             max_retries = max(0, max_retries)
             attempt = 0
+            cookie_retry_used = False
 
             while True:
                 try:
@@ -258,6 +264,11 @@ class Download:
                     log.info(f"Finished download for: {self.info.title}")
                     return
                 except yt_dlp.utils.YoutubeDLError as exc:
+                    if is_no_formats_error(exc) and self.cookiefile_fallback and not cookie_retry_used:
+                        ytdl_params['cookiefile'] = self.cookiefile_fallback
+                        cookie_retry_used = True
+                        log.warning(f"No video formats found for {self.info.title}. Retrying with cookies.")
+                        continue
                     if is_403_error(exc) and attempt < max_retries:
                         delay = retry_delay(attempt)
                         attempt += 1
@@ -563,17 +574,37 @@ class DownloadQueue:
 
     def __extract_info(self, url):
         debug_logging = logging.getLogger().isEnabledFor(logging.DEBUG)
-        return yt_dlp.YoutubeDL(params={
-            'quiet': not debug_logging,
-            'verbose': debug_logging,
-            'no_color': True,
-            'extract_flat': True,
-            'ignore_no_formats_error': True,
-            'noplaylist': True,
-            'paths': {"home": self.config.DOWNLOAD_DIR, "temp": self.config.TEMP_DIR},
-            **self.config.YTDL_OPTIONS,
-            **({'impersonate': yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.config.YTDL_OPTIONS['impersonate'])} if 'impersonate' in self.config.YTDL_OPTIONS else {}),
-        }).extract_info(url, download=False)
+        base_opts = dict(self.config.YTDL_OPTIONS)
+        cookiefile = None
+        if self.config.COOKIEFILE_ON_NO_FORMATS_ONLY:
+            cookiefile = base_opts.pop('cookiefile', None)
+
+        def build_params(opts):
+            params = {
+                'quiet': not debug_logging,
+                'verbose': debug_logging,
+                'no_color': True,
+                'extract_flat': True,
+                'ignore_no_formats_error': True,
+                'noplaylist': True,
+                'paths': {"home": self.config.DOWNLOAD_DIR, "temp": self.config.TEMP_DIR},
+                **opts,
+            }
+            if 'impersonate' in opts:
+                params['impersonate'] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(opts['impersonate'])
+            return params
+
+        def extract_with(opts):
+            return yt_dlp.YoutubeDL(params=build_params(opts)).extract_info(url, download=False)
+
+        try:
+            return extract_with(base_opts)
+        except yt_dlp.utils.YoutubeDLError as exc:
+            msg = str(exc).lower()
+            if cookiefile and "no video formats found" in msg:
+                base_opts['cookiefile'] = cookiefile
+                return extract_with(base_opts)
+            raise
 
     def __calc_download_path(self, quality, format, folder):
         base_directory = self.config.DOWNLOAD_DIR if (quality != 'audio' and format not in AUDIO_FORMATS) else self.config.AUDIO_DOWNLOAD_DIR
@@ -616,6 +647,11 @@ class DownloadQueue:
                 if property.startswith("channel"):
                     output = _outtmpl_substitute_field(output, property, value)
         ytdl_options = dict(self.config.YTDL_OPTIONS)
+        cookiefile_fallback = None
+        if self.config.COOKIEFILE_ON_NO_FORMATS_ONLY:
+            cookiefile_fallback = ytdl_options.pop('cookiefile', None)
+        if getattr(dl, 'cookiefile_fallback', None) is None:
+            dl.cookiefile_fallback = cookiefile_fallback
         playlist_item_limit = getattr(dl, 'playlist_item_limit', 0)
         if playlist_item_limit > 0:
             log.info(f'playlist limit is set. Processing only first {playlist_item_limit} entries')
