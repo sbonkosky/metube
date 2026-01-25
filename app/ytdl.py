@@ -1,6 +1,7 @@
 import os
 import shutil
 import yt_dlp
+import yt_dlp.utils
 from collections import OrderedDict
 import shelve
 import time
@@ -14,6 +15,8 @@ import subprocess
 from typing import Any
 from functools import lru_cache
 import uuid
+import json
+from urllib.parse import urlparse, parse_qs
 
 import yt_dlp.networking.impersonate
 from yt_dlp.utils import STR_FORMAT_RE_TMPL, STR_FORMAT_TYPES
@@ -97,6 +100,7 @@ class DownloadInfo:
         self.id = id if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{id}'
         self.title = title if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{title}'
         self.url = url
+        self.redirect_url = None
         self.quality = quality
         self.format = format
         self.folder = folder
@@ -109,9 +113,18 @@ class DownloadInfo:
         self.skip_existing_downloads = skip_existing_downloads
         self.retry_403_max = retry_403_max
         self.cookiefile_fallback = cookiefile_fallback
+        self.used_cookies = False
         self.error = error
         # Convert generators to lists to make entry pickleable
         self.entry = _convert_generators_to_lists(entry) if entry is not None else None
+        if isinstance(self.entry, dict):
+            self.entry_playlist_title = self.entry.get('playlist_title')
+            self.entry_playlist_id = self.entry.get('playlist_id')
+            self.entry_playlist = self.entry.get('playlist')
+        else:
+            self.entry_playlist_title = None
+            self.entry_playlist_id = None
+            self.entry_playlist = None
         self.playlist_item_limit = playlist_item_limit
         self.split_by_chapters = split_by_chapters
         self.chapter_template = chapter_template
@@ -131,6 +144,10 @@ class Download:
         if "impersonate" in self.ytdl_opts:
             self.ytdl_opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.ytdl_opts["impersonate"])
         self.info = info
+        if not hasattr(self.info, 'redirect_url'):
+            self.info.redirect_url = None
+        if not hasattr(self.info, 'used_cookies'):
+            self.info.used_cookies = False
         self.cookiefile_fallback = getattr(info, 'cookiefile_fallback', None)
         self.canceled = False
         self.tmpfilename = None
@@ -140,7 +157,8 @@ class Download:
         self.notifier = None
 
     def _download(self):
-        log.info(f"Starting download for: {self.info.title} ({self.info.url})")
+        download_url = getattr(self.info, 'redirect_url', None) or self.info.url
+        log.info(f"Starting download for: {self.info.title} ({download_url})")
         try:
             debug_logging = logging.getLogger().isEnabledFor(logging.DEBUG)
             def put_status(st):
@@ -199,6 +217,8 @@ class Download:
                 'postprocessor_hooks': [put_status_postprocessor],
                 **self.ytdl_opts,
             }
+            if ytdl_params.get('cookiefile') and self.status_queue is not None:
+                self.status_queue.put({'used_cookies': True})
 
             # Add chapter splitting options if enabled
             if self.info.split_by_chapters:
@@ -210,13 +230,13 @@ class Download:
                     'force_keyframes': False
                 })
 
-            def find_existing_path():
+            def find_existing_path(url):
                 try:
                     ydl = yt_dlp.YoutubeDL(params=ytdl_params)
-                    info = ydl.extract_info(self.info.url, download=False)
+                    info = ydl.extract_info(url, download=False)
                     filename = ydl.prepare_filename(info)
                 except Exception as exc:
-                    log.debug(f"Existing file check failed for {self.info.url}: {exc}")
+                    log.debug(f"Existing file check failed for {url}: {exc}")
                     return None
                 if not filename:
                     return None
@@ -230,7 +250,7 @@ class Download:
                 return None
 
             if getattr(self.info, 'skip_existing_downloads', False):
-                existing_path = find_existing_path()
+                existing_path = find_existing_path(download_url)
                 if existing_path:
                     log.info(f"Skipping download; file already exists at {existing_path}")
                     self.status_queue.put({'status': 'finished', 'filename': existing_path})
@@ -242,6 +262,230 @@ class Download:
 
             def is_no_formats_error(exc):
                 return "no video formats found" in str(exc).lower()
+
+            def _normalize_url(value):
+                if not value:
+                    return None
+                cleaned = value.replace('\\u0026', '&').replace('\\u003d', '=').replace('\\u002F', '/').replace('\\/', '/')
+                return cleaned
+
+            def _extract_watch_id(value):
+                if not value:
+                    return None
+                parsed = urlparse(value)
+                query_id = parse_qs(parsed.query).get('v', [None])[0]
+                if query_id:
+                    return query_id
+                if parsed.netloc.endswith('youtu.be'):
+                    path_id = parsed.path.strip('/').split('/')[0]
+                    return path_id or None
+                return None
+
+            def _safe_search(pattern, text, flags=0):
+                try:
+                    return re.search(pattern, text, flags)
+                except re.error as exc:
+                    snippet = pattern if len(pattern) <= 120 else pattern[:117] + "..."
+                    log.debug(f"Regex search failed for pattern {snippet!r}: {exc}")
+                    return None
+
+            def _safe_finditer(pattern, text):
+                try:
+                    return list(re.finditer(pattern, text))
+                except re.error as exc:
+                    snippet = pattern if len(pattern) <= 120 else pattern[:117] + "..."
+                    log.debug(f"Regex finditer failed for pattern {snippet!r}: {exc}")
+                    return []
+
+            def _extract_js_object(html, marker):
+                idx = html.find(marker)
+                if idx == -1:
+                    return None
+                start = html.find('{', idx)
+                if start == -1:
+                    return None
+                depth = 0
+                in_string = False
+                escape = False
+                for pos in range(start, len(html)):
+                    char = html[pos]
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif char == '\\':
+                            escape = True
+                        elif char == '"':
+                            in_string = False
+                    else:
+                        if char == '"':
+                            in_string = True
+                        elif char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                            if depth == 0:
+                                return html[start:pos + 1]
+                return None
+
+            def _load_json_blob(blob, label):
+                if not blob:
+                    return None
+                try:
+                    return json.loads(blob)
+                except Exception as exc:
+                    js_to_json = getattr(yt_dlp.utils, 'js_to_json', None)
+                    if not js_to_json:
+                        log.debug(f"JSON parse failed for {label}: {exc}")
+                        return None
+                    try:
+                        return json.loads(js_to_json(blob))
+                    except Exception as exc2:
+                        log.debug(f"JS-to-JSON parse failed for {label}: {exc2}")
+                        return None
+
+            def _collect_watch_ids(obj, ids=None):
+                if ids is None:
+                    ids = []
+                if isinstance(obj, dict):
+                    watch_endpoint = obj.get('watchEndpoint')
+                    if isinstance(watch_endpoint, dict):
+                        video_id = watch_endpoint.get('videoId')
+                        if isinstance(video_id, str) and len(video_id) == 11 and video_id not in ids:
+                            ids.append(video_id)
+                    video_id = obj.get('videoId')
+                    if isinstance(video_id, str) and len(video_id) == 11 and video_id not in ids:
+                        ids.append(video_id)
+                    for value in obj.values():
+                        _collect_watch_ids(value, ids)
+                elif isinstance(obj, list):
+                    for value in obj:
+                        _collect_watch_ids(value, ids)
+                return ids
+
+            def resolve_redirect_url(cookiefile=None):
+                original_url = self.info.url
+                original_id = _extract_watch_id(original_url)
+                original_base = None
+                if original_url:
+                    parsed_original = urlparse(original_url)
+                    if parsed_original.scheme and parsed_original.netloc:
+                        original_base = f"{parsed_original.scheme}://{parsed_original.netloc}"
+                base = original_base or ('https://music.youtube.com' if 'music.' in (original_url or '') else 'https://www.youtube.com')
+                try:
+                    params = dict(ytdl_params)
+                    if cookiefile:
+                        params['cookiefile'] = cookiefile
+                    ydl = yt_dlp.YoutubeDL(params=params)
+                    with ydl.urlopen(original_url) as resp:
+                        final_url = resp.geturl() if hasattr(resp, 'geturl') else None
+                        html = resp.read(2_000_000).decode('utf-8', 'ignore')
+                except Exception as exc:
+                    log.debug(f"Redirect check failed for {original_url}: {exc}")
+                    return None, None
+
+                candidates = []
+                secondary_candidates = []
+                candidate_url_map = {}
+                id_counts = {}
+
+                def add_id(video_id, weight=1, url=None):
+                    if not video_id or video_id == original_id:
+                        return
+                    id_counts[video_id] = id_counts.get(video_id, 0) + weight
+                    if url and video_id not in candidate_url_map:
+                        candidate_url_map[video_id] = url
+                if final_url:
+                    candidates.append(final_url)
+                canonical_match = _safe_search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)', html, re.IGNORECASE)
+                if canonical_match:
+                    candidates.append(canonical_match.group(1))
+                meta_refresh_match = _safe_search(r'http-equiv=["\']refresh["\'][^>]+content=["\'][^"\']*url=([^"\']+)', html, re.IGNORECASE)
+                if meta_refresh_match:
+                    candidates.append(meta_refresh_match.group(1))
+                location_match = _safe_search(r'window\.location(?:\.replace)?\(["\']([^"\']+)["\']\)', html)
+                if location_match:
+                    candidates.append(location_match.group(1))
+                url_canonical_match = _safe_search(r'"urlCanonical"\s*:\s*"([^"]+)"', html)
+                if url_canonical_match:
+                    candidates.append(url_canonical_match.group(1))
+                findall_urls = getattr(yt_dlp.utils, 'findall_urls', None)
+                if callable(findall_urls):
+                    for found_url in findall_urls(html):
+                        if 'watch?v=' in found_url:
+                            secondary_candidates.append(found_url)
+                else:
+                    for match in _safe_finditer(r'https?://[^\s"\'<>]+', html):
+                        found_url = match.group(0)
+                        if 'watch?v=' in found_url:
+                            secondary_candidates.append(found_url)
+                player_response = _load_json_blob(_extract_js_object(html, 'ytInitialPlayerResponse'), 'ytInitialPlayerResponse')
+                if player_response:
+                    microformat = player_response.get('microformat', {}).get('playerMicroformatRenderer', {})
+                    canonical_url = microformat.get('canonicalUrl') or microformat.get('urlCanonical')
+                    if canonical_url:
+                        candidates.append(canonical_url)
+                    playability = player_response.get('playabilityStatus', {})
+                    for video_id in _collect_watch_ids(playability):
+                        candidates.append(f"{base}/watch?v={video_id}")
+                initial_endpoint_match = _safe_search(r'"INITIAL_ENDPOINT"\s*:\s*"((?:\\.|[^"\\])*)"', html)
+                if initial_endpoint_match:
+                    raw_initial = initial_endpoint_match.group(1)
+                    try:
+                        initial_json_str = json.loads(f"\"{raw_initial}\"")
+                        initial_data = json.loads(initial_json_str)
+                        video_id = (initial_data.get('watchEndpoint') or {}).get('videoId')
+                        if video_id and original_base:
+                            candidates.append(f"{original_base}/watch?v={video_id}")
+                    except Exception as exc:
+                        log.debug(f"INITIAL_ENDPOINT parse failed for {original_url}: {exc}")
+                    id_match = _safe_search(r'videoId\\\\":\\\\\"([A-Za-z0-9_-]{11})', raw_initial)
+                    if not id_match:
+                        id_match = _safe_search(r'videoId\\":\\"([A-Za-z0-9_-]{11})', raw_initial)
+                    if not id_match:
+                        id_match = _safe_search(r'videoId":"([A-Za-z0-9_-]{11})', raw_initial)
+                    if id_match and original_base:
+                        candidates.append(f"{original_base}/watch?v={id_match.group(1)}")
+
+                for pattern in (
+                    r'"watchEndpoint"\s*:\s*\{[^}]*"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"',
+                    r'watchEndpoint\\\\":\\\\\\{[^}]*?videoId\\\\":\\\\\\\\\"([A-Za-z0-9_-]{11})',
+                    r'https?://(?:music\\.)?youtube\\.com/watch\\?v=([A-Za-z0-9_-]{11})',
+                    r'/watch\\?v=([A-Za-z0-9_-]{11})',
+                    r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"',
+                    r'videoId\\":\\"([A-Za-z0-9_-]{11})',
+                    r'videoId\\\\":\\\\\"([A-Za-z0-9_-]{11})',
+                    r'videoId\\\\":\\\\\\\\\"([A-Za-z0-9_-]{11})',
+                ):
+                    for match in _safe_finditer(pattern, html):
+                        add_id(match.group(1), weight=1)
+
+                initial_data = _load_json_blob(_extract_js_object(html, 'ytInitialData'), 'ytInitialData')
+                if not initial_data:
+                    initial_data = _load_json_blob(_extract_js_object(html, 'YTMUSIC_INITIAL_DATA'), 'YTMUSIC_INITIAL_DATA')
+                if initial_data:
+                    for video_id in _collect_watch_ids(initial_data):
+                        add_id(video_id, weight=1)
+
+                for candidate in candidates + secondary_candidates:
+                    candidate = _normalize_url(candidate)
+                    if not candidate:
+                        continue
+                    if candidate.startswith('/'):
+                        candidate = base + candidate
+                    candidate_id = _extract_watch_id(candidate)
+                    if candidate_id:
+                        add_id(candidate_id, weight=5, url=candidate)
+
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug(f"Redirect candidates for {original_url}: {len(candidates)}")
+                    if id_counts:
+                        preview = ", ".join(f"{vid}:{id_counts[vid]}" for vid in list(id_counts.keys())[:5])
+                        log.debug(f"Redirect candidate ids for {original_url}: {preview}")
+                if not id_counts:
+                    return None, None
+                best_id = max(id_counts.items(), key=lambda item: item[1])[0]
+                best_url = candidate_url_map.get(best_id, f"{base}/watch?v={best_id}")
+                return best_url, best_id
 
             def retry_delay(attempt):
                 schedule = [2, 5, 8, 13, 21]
@@ -256,19 +500,37 @@ class Download:
             max_retries = max(0, max_retries)
             attempt = 0
             cookie_retry_used = False
+            redirect_retry_used = False
+            attempt_index = 0
 
             while True:
+                attempt_index += 1
+                log.debug(f"Download attempt {attempt_index} for {self.info.title} (cookies={'on' if ytdl_params.get('cookiefile') else 'off'}).")
                 try:
-                    ret = yt_dlp.YoutubeDL(params=ytdl_params).download([self.info.url])
+                    ret = yt_dlp.YoutubeDL(params=ytdl_params).download([download_url])
                     self.status_queue.put({'status': 'finished' if ret == 0 else 'error'})
                     log.info(f"Finished download for: {self.info.title}")
                     return
                 except yt_dlp.utils.YoutubeDLError as exc:
-                    if is_no_formats_error(exc) and self.cookiefile_fallback and not cookie_retry_used:
-                        ytdl_params['cookiefile'] = self.cookiefile_fallback
-                        cookie_retry_used = True
-                        log.warning(f"No video formats found for {self.info.title}. Retrying with cookies.")
-                        continue
+                    if is_no_formats_error(exc):
+                        if not redirect_retry_used:
+                            redirect_url, redirect_id = resolve_redirect_url()
+                            if not redirect_url and self.cookiefile_fallback and not cookie_retry_used:
+                                redirect_url, redirect_id = resolve_redirect_url(cookiefile=self.cookiefile_fallback)
+                            if redirect_url:
+                                download_url = redirect_url
+                                if self.status_queue is not None:
+                                    self.status_queue.put({'redirect_url': redirect_url})
+                                redirect_retry_used = True
+                                log.warning(f"No video formats found for {self.info.title}. Retrying with redirected URL {redirect_url}.")
+                                continue
+                        if self.cookiefile_fallback and not cookie_retry_used:
+                            ytdl_params['cookiefile'] = self.cookiefile_fallback
+                            cookie_retry_used = True
+                            if self.status_queue is not None:
+                                self.status_queue.put({'used_cookies': True})
+                            log.warning(f"No video formats found for {self.info.title}. Retrying with cookies.")
+                            continue
                     if is_403_error(exc) and attempt < max_retries:
                         delay = retry_delay(attempt)
                         attempt += 1
@@ -337,6 +599,10 @@ class Download:
                 log.info(f"Download {self.info.title} is canceled; stopping status updates.")
                 return
             self.tmpfilename = status.get('tmpfilename')
+            if 'redirect_url' in status:
+                self.info.redirect_url = status.get('redirect_url')
+            if 'used_cookies' in status:
+                self.info.used_cookies = bool(status.get('used_cookies'))
             if 'filename' in status:
                 fileName = status.get('filename')
                 self.info.filename = os.path.relpath(fileName, self.download_dir)
@@ -359,6 +625,9 @@ class Download:
                 # Skip the rest of status processing for chapter files
                 continue
 
+            if 'status' not in status:
+                await self.notifier.updated(self.info)
+                continue
             self.info.status = status['status']
             self.info.msg = status.get('msg')
             if 'downloaded_bytes' in status:
@@ -578,6 +847,8 @@ class DownloadQueue:
         cookiefile = None
         if self.config.COOKIEFILE_ON_NO_FORMATS_ONLY:
             cookiefile = base_opts.pop('cookiefile', None)
+            if cookiefile:
+                log.debug("Extract info without cookies (COOKIEFILE_ON_NO_FORMATS_ONLY enabled).")
 
         def build_params(opts):
             params = {
@@ -602,6 +873,7 @@ class DownloadQueue:
         except yt_dlp.utils.YoutubeDLError as exc:
             msg = str(exc).lower()
             if cookiefile and "no video formats found" in msg:
+                log.warning("No video formats found during extract_info. Retrying with cookies.")
                 base_opts['cookiefile'] = cookiefile
                 return extract_with(base_opts)
             raise
@@ -722,8 +994,18 @@ class DownloadQueue:
         return {'status': 'error', 'msg': f'Unsupported resource "{etype}"'}
 
     async def add(self, url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start=True, split_by_chapters=False, chapter_template=None, already=None, entry_override=None):
+        if entry_override is None and isinstance(already, dict):
+            entry_override = already
+            already = None
+        if not isinstance(already, set):
+            already = set()
+        if isinstance(entry_override, dict):
+            override_url = entry_override.get('original_url') or entry_override.get('webpage_url') or entry_override.get('url')
+            if override_url and url != override_url:
+                url = override_url
+                entry_override['url'] = override_url
+                entry_override['webpage_url'] = override_url
         log.info(f'adding {url}: {quality=} {format=} {already=} {folder=} {custom_name_prefix=} {playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=} {entry_override is not None=}')
-        already = set() if already is None else already
         if url in already:
             log.info('recursion detected, skipping')
             return {'status': 'ok'}

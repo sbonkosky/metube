@@ -154,7 +154,14 @@ def _sanitize_playlist_name(name, fallback=None):
 
 async def _update_audio_playlist_file(dl):
     entry = dl.entry if isinstance(getattr(dl, 'entry', None), dict) else {}
-    playlist_name = entry.get('playlist_title') or entry.get('playlist') or entry.get('playlist_id')
+    playlist_name = (
+        entry.get('playlist_title')
+        or entry.get('playlist')
+        or entry.get('playlist_id')
+        or getattr(dl, 'entry_playlist_title', None)
+        or getattr(dl, 'entry_playlist', None)
+        or getattr(dl, 'entry_playlist_id', None)
+    )
     if not playlist_name or not getattr(dl, 'filename', None):
         return
     if not _is_audio_download(dl):
@@ -321,7 +328,7 @@ async def add(request):
 
     playlist_item_limit = int(playlist_item_limit)
 
-    status = await dqueue.add(url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, entry_override)
+    status = await dqueue.add(url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, entry_override=entry_override)
     return web.Response(text=serializer.encode(status))
 
 @routes.post(config.URL_PREFIX + 'delete')

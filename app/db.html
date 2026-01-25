@@ -33,8 +33,8 @@
       }
 
       main {
-        max-width: 1400px;
-        margin: 0 auto;
+        width: 100%;
+        margin: 0;
         padding: 32px 24px 48px;
       }
 
@@ -113,6 +113,49 @@
         padding: 12px 16px;
         box-shadow: 0 12px 28px var(--shadow);
         margin-bottom: 20px;
+      }
+
+      .column-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        background: rgba(255, 255, 255, 0.75);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 10px 16px;
+        box-shadow: 0 12px 28px var(--shadow);
+        margin-bottom: 20px;
+      }
+
+      .column-controls .label {
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .column-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .column-options label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #ffffff;
+        font-size: 12px;
+        color: var(--ink);
+      }
+
+      .column-options input {
+        accent-color: var(--accent);
       }
 
       .filters label {
@@ -372,6 +415,11 @@
         </select>
       </section>
 
+      <section class="column-controls">
+        <span class="label">Columns</span>
+        <div id="column-options" class="column-options" role="group" aria-label="Toggle columns"></div>
+      </section>
+
       <section class="table-wrap">
         <table id="db-table">
           <thead>
@@ -399,9 +447,30 @@
     </div>
 
     <script>
+      const STORAGE_KEY_COLUMNS = "metube.db.visibleColumns";
+
+      function loadColumnPrefs() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY_COLUMNS);
+          const parsed = raw ? JSON.parse(raw) : [];
+          return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+        } catch (error) {
+          return [];
+        }
+      }
+
+      function saveColumnPrefs(columns) {
+        try {
+          localStorage.setItem(STORAGE_KEY_COLUMNS, JSON.stringify(columns));
+        } catch (error) {
+          // Ignore storage failures (private mode, quota, etc).
+        }
+      }
+
       const state = {
         rows: [],
         columns: [],
+        visibleColumns: loadColumnPrefs(),
         sortKey: "timestamp",
         sortDir: "desc",
         playlistFilter: "",
@@ -422,6 +491,7 @@
         selectAll: document.getElementById("select-all"),
         playlistFilter: document.getElementById("playlist-filter"),
         statusFilter: document.getElementById("status-filter"),
+        columnOptions: document.getElementById("column-options"),
         modal: document.getElementById("entry-modal"),
         modalClose: document.getElementById("modal-close"),
         modalJson: document.getElementById("entry-json"),
@@ -452,7 +522,19 @@
           Object.keys(row).forEach((key) => keys.add(key));
         });
 
-        const preferred = ["entry", "where", "url", "title", "status", "filename", "size", "timestamp"];
+        const preferred = [
+          "entry",
+          "id",
+          "status",
+          "url",
+          "redirect_url",
+          "title",
+          "filename",
+          "used_cookies",
+          "entry_playlist_title",
+          "entry_playlist_id",
+          "msg",
+        ];
         const ordered = [];
         preferred.forEach((key) => {
           if (keys.has(key)) {
@@ -527,6 +609,56 @@
           .map((item) => item.row);
       }
 
+      function getVisibleColumns() {
+        return state.visibleColumns.length ? state.visibleColumns : state.columns;
+      }
+
+      function ensureSortKey() {
+        const columns = getVisibleColumns();
+        if (columns.length === 0) {
+          return;
+        }
+        if (!columns.includes(state.sortKey)) {
+          state.sortKey = columns[0];
+          state.sortDir = "asc";
+        }
+      }
+
+      function renderColumnOptions() {
+        elements.columnOptions.innerHTML = "";
+        const fragment = document.createDocumentFragment();
+        state.columns.forEach((col) => {
+          const label = document.createElement("label");
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = state.visibleColumns.includes(col);
+          input.addEventListener("change", () => {
+            let next = state.visibleColumns.slice();
+            if (input.checked) {
+              if (!next.includes(col)) {
+                next.push(col);
+              }
+            } else {
+              next = next.filter((item) => item !== col);
+            }
+            if (next.length === 0) {
+              input.checked = true;
+              return;
+            }
+            state.visibleColumns = state.columns.filter((item) => next.includes(item));
+            saveColumnPrefs(state.visibleColumns);
+            ensureSortKey();
+            render();
+          });
+          const text = document.createElement("span");
+          text.textContent = col;
+          label.appendChild(input);
+          label.appendChild(text);
+          fragment.appendChild(label);
+        });
+        elements.columnOptions.appendChild(fragment);
+      }
+
       function selectedRows() {
         return Array.from(elements.tbody.querySelectorAll("tr")).filter((row) => {
           const box = row.querySelector("input[type=checkbox]");
@@ -583,7 +715,8 @@
         selectTh.appendChild(selectInput);
         elements.headerRow.appendChild(selectTh);
 
-        state.columns.forEach((col) => {
+        const columns = getVisibleColumns();
+        columns.forEach((col) => {
           const th = document.createElement("th");
           th.textContent = col;
           th.classList.add("sortable");
@@ -608,6 +741,7 @@
         elements.tbody.innerHTML = "";
         const filtered = filterRows(state.rows);
         const rows = sortRows(filtered);
+        const columns = getVisibleColumns();
         const fragment = document.createDocumentFragment();
 
         rows.forEach((row) => {
@@ -623,7 +757,7 @@
           selectTd.appendChild(checkbox);
           tr.appendChild(selectTd);
 
-          state.columns.forEach((col) => {
+          columns.forEach((col) => {
             const td = document.createElement("td");
             if (col === "entry") {
               const button = document.createElement("button");
@@ -636,6 +770,19 @@
                 elements.modal.classList.remove("hidden");
               });
               td.appendChild(button);
+            } else if (col === "url" || col === "redirect_url") {
+              const value = row[col];
+              if (value) {
+                const link = document.createElement("a");
+                link.href = value;
+                link.textContent = value;
+                link.target = "_blank";
+                link.rel = "noopener noreferrer";
+                td.appendChild(link);
+              } else {
+                td.classList.add("muted");
+                td.textContent = "";
+              }
             } else {
               const formatted = formatValue(row[col]);
               if (formatted.isJson) {
@@ -659,6 +806,8 @@
       }
 
       function render() {
+        ensureSortKey();
+        renderColumnOptions();
         renderHeader();
         renderRows();
 
@@ -689,6 +838,8 @@
             items.forEach((item) => {
               const row = { ...item, where: key };
               row.download_id = row.download_id || row.url;
+              row.redirect_url = row.redirect_url || "";
+              row.used_cookies = row.used_cookies === true;
               if (item && typeof item.entry === "object" && item.entry !== null) {
                 Object.keys(item.entry).forEach((entryKey) => {
                   if (entryKey.startsWith("playlist")) {
@@ -701,6 +852,15 @@
           });
           state.rows = rows;
           state.columns = buildColumns(rows);
+          if (state.visibleColumns.length === 0) {
+            state.visibleColumns = state.columns.slice();
+          } else {
+            const visible = new Set(state.visibleColumns);
+            const kept = state.columns.filter((col) => visible.has(col));
+            const newCols = state.columns.filter((col) => !visible.has(col));
+            state.visibleColumns = kept.concat(newCols);
+          }
+          saveColumnPrefs(state.visibleColumns);
           render();
           elements.loaded.textContent = new Date().toLocaleString();
         } catch (error) {
@@ -823,9 +983,30 @@
               split_by_chapters: data.split_by_chapters || false,
               chapter_template: data.chapter_template,
             };
-            if (data.entry && typeof data.entry === "object") {
-              payload.entry = data.entry;
+            let entry = data.entry && typeof data.entry === "object" ? { ...data.entry } : null;
+            if (!entry) {
+              entry = { _type: "video" };
+              if (data.id) {
+                entry.id = data.id;
+              }
+              if (data.title) {
+                entry.title = data.title;
+              }
+              if (data.url) {
+                entry.url = data.url;
+                entry.webpage_url = data.url;
+              }
             }
+            if (data.entry_playlist_title && !entry.playlist_title) {
+              entry.playlist_title = data.entry_playlist_title;
+            }
+            if (data.entry_playlist_id && !entry.playlist_id) {
+              entry.playlist_id = data.entry_playlist_id;
+            }
+            if (data.entry_playlist_id && !entry.playlist) {
+              entry.playlist = data.entry_playlist_id;
+            }
+            payload.entry = entry;
             return fetch(base + "add", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
