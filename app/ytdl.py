@@ -848,7 +848,14 @@ class DownloadQueue:
         if self.config.COOKIEFILE_ON_NO_FORMATS_ONLY:
             cookiefile = base_opts.pop('cookiefile', None)
             if cookiefile:
-                log.debug("Extract info without cookies (COOKIEFILE_ON_NO_FORMATS_ONLY enabled).")
+                parsed = urlparse(url)
+                query_list = parse_qs(parsed.query).get('list', [])
+                is_liked_music = any(value == 'LM' for value in query_list)
+                if is_liked_music:
+                    base_opts['cookiefile'] = cookiefile
+                    log.debug("Extract info with cookies for liked music playlist (list=LM).")
+                else:
+                    log.debug("Extract info without cookies (COOKIEFILE_ON_NO_FORMATS_ONLY enabled).")
 
         def build_params(opts):
             params = {

@@ -259,6 +259,22 @@
         background: #f3f7f5;
       }
 
+      tbody tr.status-error {
+        background: #fbe8e8;
+      }
+
+      tbody tr.status-pending {
+        background: #fff5d6;
+      }
+
+      tbody tr.status-error:hover {
+        background: #f7dcdc;
+      }
+
+      tbody tr.status-pending:hover {
+        background: #ffecc2;
+      }
+
       td.json {
         white-space: pre-wrap;
         font-family: "Menlo", "Consolas", "Liberation Mono", monospace;
@@ -748,6 +764,11 @@
           const tr = document.createElement("tr");
           tr.dataset.where = row.where || "";
           tr.dataset.id = row.download_id || row.url || "";
+          if (row.status === "error") {
+            tr.classList.add("status-error");
+          } else if (row.status === "pending") {
+            tr.classList.add("status-pending");
+          }
 
           const selectTd = document.createElement("td");
           selectTd.className = "select-cell";
