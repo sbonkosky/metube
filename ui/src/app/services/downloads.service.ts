@@ -126,7 +126,7 @@ export class DownloadsService {
       chapter_template: chapterTemplate,
     };
     if (entry) {
-      payload.entry = entry;
+      payload['entry'] = entry;
     }
     return this.http.post<Status>('add', payload).pipe(
       catchError(this.handleHTTPError)

@@ -347,6 +347,7 @@
         </div>
         <div class="actions">
           <button id="refresh">Refresh</button>
+          <button id="retry" disabled>Retry errors</button>
           <button id="delete" disabled>Delete selected</button>
         </div>
       </header>
@@ -417,6 +418,7 @@
         loaded: document.getElementById("loaded"),
         refresh: document.getElementById("refresh"),
         delete: document.getElementById("delete"),
+        retry: document.getElementById("retry"),
         selectAll: document.getElementById("select-all"),
         playlistFilter: document.getElementById("playlist-filter"),
         statusFilter: document.getElementById("status-filter"),
@@ -525,10 +527,31 @@
           .map((item) => item.row);
       }
 
+      function selectedRows() {
+        return Array.from(elements.tbody.querySelectorAll("tr")).filter((row) => {
+          const box = row.querySelector("input[type=checkbox]");
+          return box && box.checked;
+        });
+      }
+
+      function rowDataFromElement(row) {
+        const id = row.dataset.id;
+        if (!id) {
+          return null;
+        }
+        return state.rows.find((item) => (item.download_id || item.url || "") === id) || null;
+      }
+
       function updateSelectionCount() {
-        const selected = elements.tbody.querySelectorAll("input[type=checkbox]:checked").length;
+        const rows = selectedRows();
+        const selected = rows.length;
+        const errorSelected = rows.reduce((count, row) => {
+          const data = rowDataFromElement(row);
+          return count + (data && data.status === "error" ? 1 : 0);
+        }, 0);
         elements.selected.textContent = String(selected);
         elements.delete.disabled = selected === 0;
+        elements.retry.disabled = errorSelected === 0;
       }
 
       function updateStatusMessage(visibleCount) {
@@ -686,22 +709,19 @@
       }
 
       async function deleteSelected() {
-        const selectedRows = Array.from(elements.tbody.querySelectorAll("tr")).filter((row) => {
-          const box = row.querySelector("input[type=checkbox]");
-          return box && box.checked;
-        });
+        const selected = selectedRows();
 
-        if (selectedRows.length === 0) {
+        if (selected.length === 0) {
           return;
         }
 
-        const confirmDelete = window.confirm("Delete " + selectedRows.length + " rows?");
+        const confirmDelete = window.confirm("Delete " + selected.length + " rows?");
         if (!confirmDelete) {
           return;
         }
 
         const groups = { queue: [], done: [] };
-        selectedRows.forEach((row) => {
+        selected.forEach((row) => {
           const id = row.dataset.id;
           const where = row.dataset.where;
           if (!id) {
@@ -739,8 +759,89 @@
         }
       }
 
+      async function retrySelectedErrors() {
+        const selected = selectedRows();
+        if (selected.length === 0) {
+          return;
+        }
+
+        const errorRows = selected
+          .map((row) => ({ row, data: rowDataFromElement(row) }))
+          .filter((item) => item.data && item.data.status === "error");
+
+        if (errorRows.length === 0) {
+          return;
+        }
+
+        const confirmRetry = window.confirm("Retry " + errorRows.length + " error rows?");
+        if (!confirmRetry) {
+          return;
+        }
+
+        const groups = { queue: [], done: [] };
+        errorRows.forEach(({ row }) => {
+          const id = row.dataset.id;
+          const where = row.dataset.where;
+          if (!id) {
+            return;
+          }
+          if (where === "done") {
+            groups.done.push(id);
+          } else {
+            groups.queue.push(id);
+          }
+        });
+
+        const base = basePath();
+        const requests = [];
+        if (groups.queue.length > 0) {
+          requests.push(fetch(base + "delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: groups.queue, where: "queue" }),
+          }));
+        }
+        if (groups.done.length > 0) {
+          requests.push(fetch(base + "delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids: groups.done, where: "done" }),
+          }));
+        }
+
+        try {
+          await Promise.all(requests);
+          const retryRequests = errorRows.map(({ data }) => {
+            const payload = {
+              url: data.url,
+              quality: data.quality,
+              format: data.format,
+              folder: data.folder || "",
+              custom_name_prefix: data.custom_name_prefix || "",
+              playlist_item_limit: data.playlist_item_limit ?? 0,
+              auto_start: true,
+              split_by_chapters: data.split_by_chapters || false,
+              chapter_template: data.chapter_template,
+            };
+            if (data.entry && typeof data.entry === "object") {
+              payload.entry = data.entry;
+            }
+            return fetch(base + "add", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+          });
+          await Promise.all(retryRequests);
+          await loadData();
+        } catch (error) {
+          elements.status.textContent = "Retry failed: " + error;
+        }
+      }
+
       elements.refresh.addEventListener("click", loadData);
       elements.delete.addEventListener("click", deleteSelected);
+      elements.retry.addEventListener("click", retrySelectedErrors);
       elements.playlistFilter.addEventListener("input", (event) => {
         state.playlistFilter = event.target.value || "";
         render();
