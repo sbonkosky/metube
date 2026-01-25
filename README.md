@@ -36,6 +36,7 @@ Certain values can be set via environment variables, using the `-e` parameter on
 * __MAX_CONCURRENT_DOWNLOADS__: Maximum number of simultaneous downloads allowed. For example, if set to `5`, then at most five downloads will run concurrently, and any additional downloads will wait until one of the active downloads completes. Defaults to `3`. 
 * __DELETE_FILE_ON_TRASHCAN__: if `true`, downloaded files are deleted on the server, when they are trashed from the "Completed" section of the UI. Defaults to `false`.
 * __DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT__: Maximum number of playlist items that can be downloaded. Defaults to `0` (no limit).
+* __PLAYLIST_ITEMS_OLDEST_FIRST__: If `true`, playlist entries are processed oldest to newest (newest items last). Defaults to `false`.
 
 ### 📁 Storage & Directories
 

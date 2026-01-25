@@ -549,7 +549,10 @@ class DownloadQueue:
             # Convert generator to list if needed (for len() and slicing operations)
             if isinstance(entries, types.GeneratorType):
                 entries = list(entries)
-            log.info(f'{etype} detected with {len(entries)} entries')
+            log.info(f'playlist detected with {len(entries)} entries')
+            if self.config.PLAYLIST_ITEMS_OLDEST_FIRST:
+                log.info('Playlist order set to oldest-first; processing newest items last')
+                entries.reverse()
             index_digits = len(str(len(entries)))
             results = []
             if playlist_item_limit > 0:
