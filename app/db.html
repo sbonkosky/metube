@@ -158,6 +158,62 @@
         accent-color: var(--accent);
       }
 
+      .pager {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        background: rgba(255, 255, 255, 0.75);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 10px 16px;
+        box-shadow: 0 12px 28px var(--shadow);
+        margin-bottom: 20px;
+      }
+
+      .page-summary {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .pager-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .pager-controls label {
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .pager-controls select {
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        padding: 8px 12px;
+        font-size: 13px;
+        font-family: "Trebuchet MS", "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+        background: #ffffff;
+        color: var(--ink);
+      }
+
+      .pager-controls button {
+        padding: 8px 12px;
+      }
+
+      .page-indicator {
+        min-width: 90px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
       .filters label {
         font-size: 12px;
         letter-spacing: 0.12em;
@@ -436,6 +492,22 @@
         <div id="column-options" class="column-options" role="group" aria-label="Toggle columns"></div>
       </section>
 
+      <section class="pager" aria-label="Pagination controls">
+        <div id="page-summary" class="page-summary">Showing 0 of 0 matching rows</div>
+        <div class="pager-controls">
+          <label for="page-size">Rows per page</label>
+          <select id="page-size">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="250">250</option>
+          </select>
+          <button id="prev-page" type="button" disabled>Previous</button>
+          <span id="page-indicator" class="page-indicator">Page 1 / 1</span>
+          <button id="next-page" type="button" disabled>Next</button>
+        </div>
+      </section>
+
       <section class="table-wrap">
         <table id="db-table">
           <thead>
@@ -464,6 +536,9 @@
 
     <script>
       const STORAGE_KEY_COLUMNS = "metube.db.visibleColumns";
+      const STORAGE_KEY_PAGE_SIZE = "metube.db.pageSize";
+      const PAGE_SIZE_OPTIONS = [25, 50, 100, 250];
+      const DEFAULT_PAGE_SIZE = 100;
 
       function loadColumnPrefs() {
         try {
@@ -483,6 +558,23 @@
         }
       }
 
+      function loadPageSizePref() {
+        try {
+          const value = Number(localStorage.getItem(STORAGE_KEY_PAGE_SIZE));
+          return PAGE_SIZE_OPTIONS.includes(value) ? value : DEFAULT_PAGE_SIZE;
+        } catch (error) {
+          return DEFAULT_PAGE_SIZE;
+        }
+      }
+
+      function savePageSizePref(pageSize) {
+        try {
+          localStorage.setItem(STORAGE_KEY_PAGE_SIZE, String(pageSize));
+        } catch (error) {
+          // Ignore storage failures (private mode, quota, etc).
+        }
+      }
+
       const state = {
         rows: [],
         columns: [],
@@ -491,6 +583,9 @@
         sortDir: "desc",
         playlistFilter: "",
         statusFilter: "",
+        selectedIds: new Set(),
+        pageSize: loadPageSizePref(),
+        currentPage: 1,
       };
 
       const elements = {
@@ -508,6 +603,11 @@
         playlistFilter: document.getElementById("playlist-filter"),
         statusFilter: document.getElementById("status-filter"),
         columnOptions: document.getElementById("column-options"),
+        pageSummary: document.getElementById("page-summary"),
+        pageSize: document.getElementById("page-size"),
+        pageIndicator: document.getElementById("page-indicator"),
+        prevPage: document.getElementById("prev-page"),
+        nextPage: document.getElementById("next-page"),
         modal: document.getElementById("entry-modal"),
         modalClose: document.getElementById("modal-close"),
         modalJson: document.getElementById("entry-json"),
@@ -590,6 +690,14 @@
         return row.entry_playlist_title || row.entry_playlist || row.entry_playlist_id || "";
       }
 
+      function rowId(row) {
+        return row.download_id || row.url || "";
+      }
+
+      function rowDataById(id) {
+        return state.rows.find((item) => rowId(item) === id) || null;
+      }
+
       function filterRows(rows) {
         const term = state.playlistFilter.trim().toLowerCase();
         const statusTerm = state.statusFilter.trim().toLowerCase();
@@ -623,6 +731,33 @@
             return a.index - b.index;
           })
           .map((item) => item.row);
+      }
+
+      function totalPagesForRows(totalRows) {
+        return Math.max(1, Math.ceil(totalRows / state.pageSize));
+      }
+
+      function ensurePageInRange(totalRows) {
+        const totalPages = totalPagesForRows(totalRows);
+        if (state.currentPage > totalPages) {
+          state.currentPage = totalPages;
+        }
+        if (state.currentPage < 1) {
+          state.currentPage = 1;
+        }
+        return totalPages;
+      }
+
+      function pageRows(rows) {
+        const totalPages = ensurePageInRange(rows.length);
+        const start = (state.currentPage - 1) * state.pageSize;
+        const end = Math.min(start + state.pageSize, rows.length);
+        return {
+          rows: rows.slice(start, end),
+          start,
+          end,
+          totalPages,
+        };
       }
 
       function getVisibleColumns() {
@@ -675,37 +810,61 @@
         elements.columnOptions.appendChild(fragment);
       }
 
-      function selectedRows() {
-        return Array.from(elements.tbody.querySelectorAll("tr")).filter((row) => {
-          const box = row.querySelector("input[type=checkbox]");
-          return box && box.checked;
+      function selectedRowsData() {
+        const selected = [];
+        const stale = [];
+        state.selectedIds.forEach((id) => {
+          const row = rowDataById(id);
+          if (row) {
+            selected.push(row);
+          } else {
+            stale.push(id);
+          }
         });
-      }
-
-      function rowDataFromElement(row) {
-        const id = row.dataset.id;
-        if (!id) {
-          return null;
-        }
-        return state.rows.find((item) => (item.download_id || item.url || "") === id) || null;
+        stale.forEach((id) => state.selectedIds.delete(id));
+        return selected;
       }
 
       function updateSelectionCount() {
-        const rows = selectedRows();
+        const rows = selectedRowsData();
         const selected = rows.length;
-        const errorSelected = rows.reduce((count, row) => {
-          const data = rowDataFromElement(row);
-          return count + (data && data.status === "error" ? 1 : 0);
+        const errorSelected = rows.reduce((count, data) => {
+          return count + (data.status === "error" ? 1 : 0);
         }, 0);
         elements.selected.textContent = String(selected);
         elements.delete.disabled = selected === 0;
         elements.retry.disabled = errorSelected === 0;
       }
 
-      function updateStatusMessage(visibleCount) {
+      function updateSelectAllState() {
+        if (!elements.selectAll) {
+          return;
+        }
+        const boxes = Array.from(elements.tbody.querySelectorAll("input[type=checkbox]"));
+        const checked = boxes.filter((box) => box.checked).length;
+        elements.selectAll.checked = boxes.length > 0 && checked === boxes.length;
+        elements.selectAll.indeterminate = checked > 0 && checked < boxes.length;
+      }
+
+      function updatePager(totalCount, start, end, totalPages) {
+        if (totalCount === 0) {
+          elements.pageSummary.textContent = "Showing 0 of 0 matching rows";
+        } else {
+          elements.pageSummary.textContent = `Showing ${start + 1}-${end} of ${totalCount} matching rows`;
+        }
+        elements.pageIndicator.textContent = `Page ${state.currentPage} / ${totalPages}`;
+        elements.prevPage.disabled = state.currentPage <= 1 || totalCount === 0;
+        elements.nextPage.disabled = state.currentPage >= totalPages || totalCount === 0;
+        elements.pageSize.value = String(state.pageSize);
+      }
+
+      function updateStatusMessage(filteredCount, start, end) {
         const total = state.rows.length;
         const term = state.playlistFilter.trim();
         const statusTerm = state.statusFilter.trim();
+        const rangeText = filteredCount === 0
+          ? "Showing 0 rows."
+          : `Showing rows ${start + 1}-${end} of ${filteredCount}.`;
         if (term || statusTerm) {
           const pieces = [];
           if (term) {
@@ -714,9 +873,9 @@
           if (statusTerm) {
             pieces.push(`status "${statusTerm}"`);
           }
-          elements.status.textContent = `Showing ${visibleCount} of ${total} rows for ${pieces.join(" and ")}.`;
+          elements.status.textContent = `${rangeText} Filtered from ${total} total rows by ${pieces.join(" and ")}.`;
         } else {
-          elements.status.textContent = `Loaded ${total} rows.`;
+          elements.status.textContent = `${rangeText} Loaded ${total} total rows.`;
         }
       }
 
@@ -745,25 +904,40 @@
 
         elements.selectAll = selectInput;
         elements.selectAll.addEventListener("change", () => {
-          const rows = elements.tbody.querySelectorAll("input[type=checkbox]");
-          rows.forEach((box) => {
+          const rows = Array.from(elements.tbody.querySelectorAll("tr"));
+          rows.forEach((row) => {
+            const id = row.dataset.id;
+            const box = row.querySelector("input[type=checkbox]");
+            if (!box || !id) {
+              return;
+            }
             box.checked = elements.selectAll.checked;
+            if (elements.selectAll.checked) {
+              state.selectedIds.add(id);
+            } else {
+              state.selectedIds.delete(id);
+            }
           });
           updateSelectionCount();
+          updateSelectAllState();
         });
       }
 
       function renderRows() {
         elements.tbody.innerHTML = "";
         const filtered = filterRows(state.rows);
-        const rows = sortRows(filtered);
+        const sorted = sortRows(filtered);
+        const filteredIds = new Set(sorted.map((row) => rowId(row)).filter(Boolean));
+        state.selectedIds = new Set(Array.from(state.selectedIds).filter((id) => filteredIds.has(id)));
+        const paged = pageRows(sorted);
+        const rows = paged.rows;
         const columns = getVisibleColumns();
         const fragment = document.createDocumentFragment();
 
         rows.forEach((row) => {
           const tr = document.createElement("tr");
           tr.dataset.where = row.where || "";
-          tr.dataset.id = row.download_id || row.url || "";
+          tr.dataset.id = rowId(row);
           if (row.status === "error") {
             tr.classList.add("status-error");
           } else if (row.status === "pending") {
@@ -774,7 +948,20 @@
           selectTd.className = "select-cell";
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
-          checkbox.addEventListener("change", updateSelectionCount);
+          const id = rowId(row);
+          checkbox.checked = id ? state.selectedIds.has(id) : false;
+          checkbox.addEventListener("change", () => {
+            if (!id) {
+              return;
+            }
+            if (checkbox.checked) {
+              state.selectedIds.add(id);
+            } else {
+              state.selectedIds.delete(id);
+            }
+            updateSelectionCount();
+            updateSelectAllState();
+          });
           selectTd.appendChild(checkbox);
           tr.appendChild(selectTd);
 
@@ -822,8 +1009,10 @@
 
         elements.tbody.appendChild(fragment);
         elements.total.textContent = String(filtered.length);
+        updatePager(filtered.length, paged.start, paged.end, paged.totalPages);
         updateSelectionCount();
-        updateStatusMessage(filtered.length);
+        updateSelectAllState();
+        updateStatusMessage(filtered.length, paged.start, paged.end);
       }
 
       function render() {
@@ -872,6 +1061,8 @@
             });
           });
           state.rows = rows;
+          state.selectedIds.clear();
+          state.currentPage = 1;
           state.columns = buildColumns(rows);
           if (state.visibleColumns.length === 0) {
             state.visibleColumns = state.columns.slice();
@@ -890,7 +1081,7 @@
       }
 
       async function deleteSelected() {
-        const selected = selectedRows();
+        const selected = selectedRowsData().filter((row) => rowId(row));
 
         if (selected.length === 0) {
           return;
@@ -903,8 +1094,8 @@
 
         const groups = { queue: [], done: [] };
         selected.forEach((row) => {
-          const id = row.dataset.id;
-          const where = row.dataset.where;
+          const id = rowId(row);
+          const where = row.where;
           if (!id) {
             return;
           }
@@ -941,14 +1132,13 @@
       }
 
       async function retrySelectedErrors() {
-        const selected = selectedRows();
+        const selected = selectedRowsData();
         if (selected.length === 0) {
           return;
         }
 
         const errorRows = selected
-          .map((row) => ({ row, data: rowDataFromElement(row) }))
-          .filter((item) => item.data && item.data.status === "error");
+          .filter((item) => rowId(item) && item.status === "error");
 
         if (errorRows.length === 0) {
           return;
@@ -960,9 +1150,9 @@
         }
 
         const groups = { queue: [], done: [] };
-        errorRows.forEach(({ row }) => {
-          const id = row.dataset.id;
-          const where = row.dataset.where;
+        errorRows.forEach((row) => {
+          const id = rowId(row);
+          const where = row.where;
           if (!id) {
             return;
           }
@@ -992,7 +1182,7 @@
 
         try {
           await Promise.all(requests);
-          const retryRequests = errorRows.map(({ data }) => {
+          const retryRequests = errorRows.map((data) => {
             const payload = {
               url: data.url,
               quality: data.quality,
@@ -1046,10 +1236,31 @@
       elements.retry.addEventListener("click", retrySelectedErrors);
       elements.playlistFilter.addEventListener("input", (event) => {
         state.playlistFilter = event.target.value || "";
+        state.currentPage = 1;
         render();
       });
       elements.statusFilter.addEventListener("change", (event) => {
         state.statusFilter = event.target.value || "";
+        state.currentPage = 1;
+        render();
+      });
+      elements.pageSize.value = String(state.pageSize);
+      elements.pageSize.addEventListener("change", (event) => {
+        const next = Number(event.target.value);
+        state.pageSize = PAGE_SIZE_OPTIONS.includes(next) ? next : DEFAULT_PAGE_SIZE;
+        savePageSizePref(state.pageSize);
+        state.currentPage = 1;
+        render();
+      });
+      elements.prevPage.addEventListener("click", () => {
+        if (state.currentPage <= 1) {
+          return;
+        }
+        state.currentPage -= 1;
+        render();
+      });
+      elements.nextPage.addEventListener("click", () => {
+        state.currentPage += 1;
         render();
       });
       elements.modalClose.addEventListener("click", () => {

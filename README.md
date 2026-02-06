@@ -115,7 +115,7 @@ Browser extensions allow right-clicking videos and sending them directly to MeTu
 
 ## 🧰 Database browser
 
-You can browse the persisted queue data at `/db` (for example, `http://localhost:8081/db`). The page lists all queue, pending, and completed rows, supports column sorting, and lets you delete selected rows.
+You can browse the persisted queue data at `/db` (for example, `http://localhost:8081/db`). The page lists all queue, pending, and completed rows, supports column sorting and pagination, and lets you delete selected rows.
 
 __Chrome:__ contributed by [Rpsl](https://github.com/rpsl). You can install it from [Google Chrome Webstore](https://chrome.google.com/webstore/detail/metube-downloader/fbmkmdnlhacefjljljlbhkodfmfkijdh) or use developer mode and install [from sources](https://github.com/Rpsl/metube-browser-extension).
 
