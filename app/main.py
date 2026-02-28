@@ -167,9 +167,10 @@ async def _update_audio_playlist_file(dl):
     if not _is_audio_download(dl):
         return
 
-    playlist_dir = os.path.join(config.AUDIO_DOWNLOAD_DIR, '_playlists')
+    base = os.path.join(config.AUDIO_DOWNLOAD_DIR, dl.folder) if dl.folder else config.AUDIO_DOWNLOAD_DIR
+    playlist_dir = os.path.join(base, '_playlists')
     os.makedirs(playlist_dir, exist_ok=True)
-    download_dir = os.path.join(config.AUDIO_DOWNLOAD_DIR, dl.folder) if dl.folder else config.AUDIO_DOWNLOAD_DIR
+    download_dir = base
     media_path = os.path.join(download_dir, dl.filename)
     try:
         rel_path = os.path.relpath(media_path, playlist_dir)
