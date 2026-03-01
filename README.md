@@ -37,7 +37,7 @@ Certain values can be set via environment variables, using the `-e` parameter on
 * __DELETE_FILE_ON_TRASHCAN__: if `true`, downloaded files are deleted on the server, when they are trashed from the "Completed" section of the UI. Defaults to `false`.
 * __DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT__: Maximum number of playlist items that can be downloaded. Defaults to `0` (no limit).
 * __PLAYLIST_ITEMS_OLDEST_FIRST__: If `true`, playlist entries are processed oldest to newest (newest items last). Defaults to `false`.
-* __SKIP_EXISTING_DOWNLOADS__: If `true`, skip downloads when the target file already exists on disk (the DB entry is still created). Defaults to `false`.
+* __SKIP_EXISTING_DOWNLOADS__: If `true`, skip downloads when the target file already exists on disk (the DB entry is still created). For audio downloads, MeTube also reuses completed items by YouTube ID across `AUDIO_DOWNLOAD_DIR` and subdirectories by creating a hard link into the requested destination when possible; when a URL resolves/redirects to a different YouTube ID, the resolved ID is used for duplicate matching. Defaults to `false`.
 * __RETRY_403_MAX__: Number of retry attempts for HTTP 403 errors during download. Defaults to `0`.
 
 ### 📁 Storage & Directories

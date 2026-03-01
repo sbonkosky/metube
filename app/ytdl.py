@@ -1,5 +1,6 @@
 import os
 import shutil
+import errno
 import yt_dlp
 import yt_dlp.utils
 from collections import OrderedDict
@@ -17,6 +18,7 @@ from functools import lru_cache
 import uuid
 import json
 from urllib.parse import urlparse, parse_qs
+from mutagen import File as MutagenFile
 
 import yt_dlp.networking.impersonate
 from yt_dlp.utils import STR_FORMAT_RE_TMPL, STR_FORMAT_TYPES
@@ -79,6 +81,11 @@ def _ensure_download_id(info, fallback=None):
     info.download_id = fallback or uuid.uuid4().hex
     return info.download_id
 
+def _is_within_root(path, root):
+    if path == root:
+        return True
+    return path.startswith(root + os.sep)
+
 class DownloadQueueNotifier:
     async def added(self, dl):
         raise NotImplementedError
@@ -132,7 +139,7 @@ class DownloadInfo:
 class Download:
     manager = None
 
-    def __init__(self, download_dir, temp_dir, output_template, output_template_chapter, quality, format, ytdl_opts, info):
+    def __init__(self, download_dir, temp_dir, output_template, output_template_chapter, quality, format, ytdl_opts, info, audio_download_dir=None, state_dir=None):
         self.download_dir = download_dir
         self.temp_dir = temp_dir
         self.output_template = output_template
@@ -149,6 +156,8 @@ class Download:
         if not hasattr(self.info, 'used_cookies'):
             self.info.used_cookies = False
         self.cookiefile_fallback = getattr(info, 'cookiefile_fallback', None)
+        self.audio_download_dir = audio_download_dir
+        self.state_dir = state_dir
         self.canceled = False
         self.tmpfilename = None
         self.status_queue = None
@@ -230,31 +239,194 @@ class Download:
                     'force_keyframes': False
                 })
 
-            def find_existing_path(url):
+            def _info_get(obj, key, default=None):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            def _extract_video_id_from_url(value):
+                if not value:
+                    return None
+                parsed = urlparse(value)
+                query_id = parse_qs(parsed.query).get('v', [None])[0]
+                if query_id:
+                    return query_id
+                if parsed.netloc.endswith('youtu.be'):
+                    path_id = parsed.path.strip('/').split('/')[0]
+                    return path_id or None
+                return None
+
+            def resolve_expected_paths(url):
+                target_filename = None
+                video_id = None
+                entry = getattr(self.info, 'entry', None)
+                if isinstance(entry, dict):
+                    entry_id = entry.get('id')
+                    if isinstance(entry_id, str) and entry_id:
+                        video_id = entry_id
+                if not video_id:
+                    candidate_id = getattr(self.info, 'id', None)
+                    if isinstance(candidate_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{11}', candidate_id):
+                        video_id = candidate_id
+                if not video_id:
+                    video_id = _extract_video_id_from_url(url)
+
                 try:
                     ydl = yt_dlp.YoutubeDL(params=ytdl_params)
                     info = ydl.extract_info(url, download=False)
                     filename = ydl.prepare_filename(info)
+                    info_id = info.get('id')
+                    if isinstance(info_id, str) and info_id:
+                        if video_id and video_id != info_id:
+                            log.debug(f"Using resolved video id {info_id} instead of requested id {video_id} for duplicate lookup")
+                        video_id = info_id
                 except Exception as exc:
                     log.debug(f"Existing file check failed for {url}: {exc}")
-                    return None
+                    return None, None, video_id
+
                 if not filename:
-                    return None
+                    return None, None, video_id
+
+                target_filename = filename
                 candidates = [filename]
-                if self.info.format in AUDIO_FORMATS:
+                requested_format = getattr(self.info, 'format', None)
+                if requested_format in AUDIO_FORMATS:
                     base, _ = os.path.splitext(filename)
-                    candidates.append(base + '.' + self.info.format)
+                    target_filename = base + f'.{requested_format}'
+                    if target_filename not in candidates:
+                        candidates.append(target_filename)
+
                 for candidate in candidates:
                     if os.path.exists(candidate):
-                        return candidate
+                        return target_filename, candidate, video_id
+                return target_filename, None, video_id
+
+            def _value_contains_video_id(value, video_id):
+                if value is None:
+                    return False
+                if isinstance(value, (list, tuple, set)):
+                    return any(_value_contains_video_id(item, video_id) for item in value)
+                text = str(value)
+                if not text:
+                    return False
+                return (
+                    video_id in text
+                    or f"watch?v={video_id}" in text
+                    or f"youtu.be/{video_id}" in text
+                )
+
+            def _file_matches_video_id(path, video_id):
+                base_name = os.path.basename(path)
+                if video_id in base_name:
+                    return True
+                try:
+                    metadata = MutagenFile(path)
+                except Exception as exc:
+                    log.debug(f"Failed reading metadata for duplicate lookup ({path}): {exc}")
+                    return False
+                tags = getattr(metadata, 'tags', None)
+                if not tags:
+                    return False
+                try:
+                    values = tags.values() if hasattr(tags, 'values') else []
+                except Exception:
+                    values = []
+                for value in values:
+                    if _value_contains_video_id(value, video_id):
+                        return True
+                return False
+
+            def find_audio_duplicate_path_by_video_id(video_id, target_path=None):
+                if not video_id or not self.audio_download_dir:
+                    return None
+
+                real_audio_root = os.path.realpath(self.audio_download_dir)
+                target_real = os.path.realpath(target_path) if target_path else None
+                requested_format = str(getattr(self.info, 'format', '') or '').lower()
+
+                if self.state_dir:
+                    completed_path = os.path.join(self.state_dir, 'completed')
+                    try:
+                        with shelve.open(completed_path, 'r') as shelf:
+                            completed_items = list(shelf.items())
+                    except Exception as exc:
+                        log.debug(f"Failed to read completed downloads for duplicate lookup: {exc}")
+                        completed_items = []
+
+                    for _, saved_info in completed_items:
+                        entry = _info_get(saved_info, 'entry', None)
+                        entry_id = entry.get('id') if isinstance(entry, dict) else None
+                        saved_url_id = _extract_video_id_from_url(_info_get(saved_info, 'url', None))
+                        saved_redirect_id = _extract_video_id_from_url(_info_get(saved_info, 'redirect_url', None))
+                        if video_id not in {entry_id, saved_url_id, saved_redirect_id}:
+                            continue
+
+                        saved_quality = _info_get(saved_info, 'quality', None)
+                        saved_format = str(_info_get(saved_info, 'format', '') or '').lower()
+                        if saved_quality != 'audio' and saved_format not in AUDIO_FORMATS:
+                            continue
+                        if requested_format in AUDIO_FORMATS and saved_format and saved_format != requested_format:
+                            continue
+
+                        saved_filename = _info_get(saved_info, 'filename', None)
+                        if not isinstance(saved_filename, str) or not saved_filename:
+                            continue
+
+                        saved_folder = _info_get(saved_info, 'folder', None)
+                        candidate_base = os.path.join(real_audio_root, saved_folder) if saved_folder else real_audio_root
+                        candidate_path = os.path.realpath(os.path.join(candidate_base, saved_filename))
+                        if not _is_within_root(candidate_path, real_audio_root):
+                            continue
+                        if target_real and candidate_path == target_real:
+                            continue
+                        if os.path.isfile(candidate_path):
+                            return candidate_path
+
+                for current_root, _, files in os.walk(real_audio_root):
+                    for file_name in files:
+                        extension = os.path.splitext(file_name)[1].lower().lstrip('.')
+                        if extension not in AUDIO_FORMATS:
+                            continue
+                        if requested_format in AUDIO_FORMATS and extension != requested_format:
+                            continue
+
+                        candidate_path = os.path.realpath(os.path.join(current_root, file_name))
+                        if target_real and candidate_path == target_real:
+                            continue
+                        if not _is_within_root(candidate_path, real_audio_root):
+                            continue
+                        if not os.path.isfile(candidate_path):
+                            continue
+                        if _file_matches_video_id(candidate_path, video_id):
+                            return candidate_path
                 return None
 
-            if getattr(self.info, 'skip_existing_downloads', False):
-                existing_path = find_existing_path(download_url)
-                if existing_path:
-                    log.info(f"Skipping download; file already exists at {existing_path}")
-                    self.status_queue.put({'status': 'finished', 'filename': existing_path})
-                    return
+            def hard_link_audio_duplicate(source_path, target_path):
+                if not source_path or not target_path:
+                    return False
+
+                if os.path.exists(target_path):
+                    try:
+                        if os.path.samefile(source_path, target_path):
+                            return True
+                    except OSError:
+                        pass
+                    log.info(f"Duplicate target already exists at {target_path}; skipping hard-link creation")
+                    return False
+
+                target_dir = os.path.dirname(target_path)
+                if target_dir:
+                    os.makedirs(target_dir, exist_ok=True)
+
+                try:
+                    os.link(source_path, target_path)
+                    return True
+                except OSError as exc:
+                    if exc.errno == errno.EXDEV:
+                        log.warning(f"Unable to hard-link duplicate across filesystems ({source_path} -> {target_path})")
+                    else:
+                        log.warning(f"Failed to hard-link duplicate ({source_path} -> {target_path}): {exc}")
+                    return False
 
             def is_403_error(exc):
                 msg = str(exc).lower()
@@ -492,6 +664,51 @@ class Download:
                 if attempt < len(schedule):
                     return schedule[attempt]
                 return schedule[-1] + 5 * (attempt - len(schedule) + 1)
+
+            if getattr(self.info, 'skip_existing_downloads', False):
+                target_path, existing_path, initial_video_id = resolve_expected_paths(download_url)
+                if existing_path:
+                    log.info(f"Skipping download; file already exists at {existing_path}")
+                    self.status_queue.put({'status': 'finished', 'filename': existing_path})
+                    return
+
+                is_audio = getattr(self.info, 'quality', None) == 'audio' or getattr(self.info, 'format', None) in AUDIO_FORMATS
+                if is_audio and target_path:
+                    candidate_video_ids = []
+
+                    def _add_candidate_video_id(value):
+                        if value and value not in candidate_video_ids:
+                            candidate_video_ids.append(value)
+
+                    _add_candidate_video_id(initial_video_id)
+                    _add_candidate_video_id(_extract_watch_id(getattr(self.info, 'redirect_url', None)))
+
+                    duplicate_source_path = None
+                    duplicate_video_id = None
+                    for candidate_video_id in candidate_video_ids:
+                        duplicate_source_path = find_audio_duplicate_path_by_video_id(candidate_video_id, target_path=target_path)
+                        if duplicate_source_path:
+                            duplicate_video_id = candidate_video_id
+                            break
+
+                    resolved_redirect_url = None
+                    if not duplicate_source_path:
+                        redirect_url, redirect_id = resolve_redirect_url()
+                        if not redirect_url and self.cookiefile_fallback:
+                            redirect_url, redirect_id = resolve_redirect_url(cookiefile=self.cookiefile_fallback)
+                        if redirect_id:
+                            _add_candidate_video_id(redirect_id)
+                            duplicate_source_path = find_audio_duplicate_path_by_video_id(redirect_id, target_path=target_path)
+                            if duplicate_source_path:
+                                duplicate_video_id = redirect_id
+                                resolved_redirect_url = redirect_url
+
+                    if duplicate_source_path and hard_link_audio_duplicate(duplicate_source_path, target_path):
+                        if resolved_redirect_url and self.status_queue is not None:
+                            self.status_queue.put({'redirect_url': resolved_redirect_url})
+                        log.info(f"Skipping download; hard-linked duplicate for video id {duplicate_video_id}: {target_path}")
+                        self.status_queue.put({'status': 'finished', 'filename': target_path})
+                        return
 
             try:
                 max_retries = int(getattr(self.info, 'retry_403_max', 0) or 0)
@@ -935,7 +1152,18 @@ class DownloadQueue:
         if playlist_item_limit > 0:
             log.info(f'playlist limit is set. Processing only first {playlist_item_limit} entries')
             ytdl_options['playlistend'] = playlist_item_limit
-        download = Download(dldirectory, self.config.TEMP_DIR, output, output_chapter, dl.quality, dl.format, ytdl_options, dl)
+        download = Download(
+            dldirectory,
+            self.config.TEMP_DIR,
+            output,
+            output_chapter,
+            dl.quality,
+            dl.format,
+            ytdl_options,
+            dl,
+            audio_download_dir=self.config.AUDIO_DOWNLOAD_DIR,
+            state_dir=self.config.STATE_DIR,
+        )
         if auto_start is True:
             self.queue.put(download)
             asyncio.create_task(self.__start_download(download))
