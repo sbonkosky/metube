@@ -30,7 +30,8 @@ Request body (JSON):
     "webpage_url": "https://music.youtube.com/watch?v=abc123def45",
     "playlist_id": "PL123...",
     "playlist_title": "My Playlist"
-  }
+  },
+  "cookies": "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2145916800\tSID\t..."
 }
 ```
 
@@ -45,6 +46,7 @@ or
 
 Notes:
 - `entry` is optional; if present it is used as a metadata override (useful for retries).
+- `cookies` is optional; when present, it must be the cookie file contents (not a server path), up to 262144 bytes. The file is used only for that request's queued downloads and is cleaned up automatically.
 - `quality` is required.
 
 ### `POST /delete`

@@ -86,6 +86,16 @@ def _is_within_root(path, root):
         return True
     return path.startswith(root + os.sep)
 
+def _safe_unlink(path, label='file'):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning(f"Failed to remove {label} {path}: {exc}")
+
 class DownloadQueueNotifier:
     async def added(self, dl):
         raise NotImplementedError
@@ -139,7 +149,7 @@ class DownloadInfo:
 class Download:
     manager = None
 
-    def __init__(self, download_dir, temp_dir, output_template, output_template_chapter, quality, format, ytdl_opts, info, audio_download_dir=None, state_dir=None):
+    def __init__(self, download_dir, temp_dir, output_template, output_template_chapter, quality, format, ytdl_opts, info, audio_download_dir=None, state_dir=None, cookiefile_fallback=None, request_cookiefile=None):
         self.download_dir = download_dir
         self.temp_dir = temp_dir
         self.output_template = output_template
@@ -155,7 +165,8 @@ class Download:
             self.info.redirect_url = None
         if not hasattr(self.info, 'used_cookies'):
             self.info.used_cookies = False
-        self.cookiefile_fallback = getattr(info, 'cookiefile_fallback', None)
+        self.cookiefile_fallback = cookiefile_fallback if cookiefile_fallback is not None else getattr(info, 'cookiefile_fallback', None)
+        self.request_cookiefile = request_cookiefile
         self.audio_download_dir = audio_download_dir
         self.state_dir = state_dir
         self.canceled = False
@@ -985,6 +996,7 @@ class DownloadQueue:
         self.config = config
         self.notifier = notifier
         self.retry_403_max = self._parse_retry_403_max()
+        self.request_cookiefile_refs = {}
         self.queue = PersistentQueue("queue", self.config.STATE_DIR + '/queue')
         self.done = PersistentQueue("completed", self.config.STATE_DIR + '/completed')
         self.pending = PersistentQueue("pending", self.config.STATE_DIR + '/pending')
@@ -999,6 +1011,21 @@ class DownloadQueue:
             log.warning(f'Invalid RETRY_403_MAX value "{self.config.RETRY_403_MAX}", defaulting to 0')
             return 0
         return max(0, value)
+
+    def _acquire_request_cookiefile(self, path):
+        if not path:
+            return
+        self.request_cookiefile_refs[path] = self.request_cookiefile_refs.get(path, 0) + 1
+
+    def _release_request_cookiefile(self, path):
+        if not path:
+            return
+        remaining = self.request_cookiefile_refs.get(path, 0) - 1
+        if remaining <= 0:
+            self.request_cookiefile_refs.pop(path, None)
+            _safe_unlink(path, label='request cookie file')
+            return
+        self.request_cookiefile_refs[path] = remaining
 
     def _has_playlist_entry(self, playlist_id, entry_id):
         if not entry_id:
@@ -1048,6 +1075,7 @@ class DownloadQueue:
                 except:
                     pass
             download.info.status = 'error'
+        self._release_request_cookiefile(getattr(download, 'request_cookiefile', None))
         download.close()
         dl_key = _ensure_download_id(download.info, download.info.url)
         if self.queue.exists(dl_key):
@@ -1058,9 +1086,11 @@ class DownloadQueue:
                 self.done.put(download)
                 asyncio.create_task(self.notifier.completed(download.info))
 
-    def __extract_info(self, url):
+    def __extract_info(self, url, request_cookiefile=None):
         debug_logging = logging.getLogger().isEnabledFor(logging.DEBUG)
         base_opts = dict(self.config.YTDL_OPTIONS)
+        if request_cookiefile:
+            base_opts['cookiefile'] = request_cookiefile
         cookiefile = None
         if self.config.COOKIEFILE_ON_NO_FORMATS_ONLY:
             cookiefile = base_opts.pop('cookiefile', None)
@@ -1119,7 +1149,7 @@ class DownloadQueue:
             dldirectory = base_directory
         return dldirectory, None
 
-    async def __add_download(self, dl, auto_start):
+    async def __add_download(self, dl, auto_start, request_cookiefile=None):
         if not hasattr(dl, 'skip_existing_downloads'):
             dl.skip_existing_downloads = self.config.SKIP_EXISTING_DOWNLOADS
         if not hasattr(dl, 'retry_403_max'):
@@ -1143,11 +1173,14 @@ class DownloadQueue:
                 if property.startswith("channel"):
                     output = _outtmpl_substitute_field(output, property, value)
         ytdl_options = dict(self.config.YTDL_OPTIONS)
+        if request_cookiefile:
+            ytdl_options['cookiefile'] = request_cookiefile
         cookiefile_fallback = None
         if self.config.COOKIEFILE_ON_NO_FORMATS_ONLY:
             cookiefile_fallback = ytdl_options.pop('cookiefile', None)
-        if getattr(dl, 'cookiefile_fallback', None) is None:
+        if request_cookiefile is None and getattr(dl, 'cookiefile_fallback', None) is None:
             dl.cookiefile_fallback = cookiefile_fallback
+        resolved_cookiefile_fallback = cookiefile_fallback if request_cookiefile is not None else getattr(dl, 'cookiefile_fallback', None)
         playlist_item_limit = getattr(dl, 'playlist_item_limit', 0)
         if playlist_item_limit > 0:
             log.info(f'playlist limit is set. Processing only first {playlist_item_limit} entries')
@@ -1163,7 +1196,11 @@ class DownloadQueue:
             dl,
             audio_download_dir=self.config.AUDIO_DOWNLOAD_DIR,
             state_dir=self.config.STATE_DIR,
+            cookiefile_fallback=resolved_cookiefile_fallback,
+            request_cookiefile=request_cookiefile,
         )
+        if request_cookiefile:
+            self._acquire_request_cookiefile(request_cookiefile)
         if auto_start is True:
             self.queue.put(download)
             asyncio.create_task(self.__start_download(download))
@@ -1171,7 +1208,7 @@ class DownloadQueue:
             self.pending.put(download)
         await self.notifier.added(dl)
 
-    async def __add_entry(self, entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already):
+    async def __add_entry(self, entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already, request_cookiefile=None):
         if not entry:
             return {'status': 'error', 'msg': "Invalid/empty data was given."}
 
@@ -1187,7 +1224,7 @@ class DownloadQueue:
 
         if etype.startswith('url'):
             log.debug('Processing as a url')
-            return await self.add(entry['url'], quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already)
+            return await self.add(entry['url'], quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already, request_cookiefile=request_cookiefile)
         elif etype == 'playlist' or etype == 'channel':
             log.debug(f'Processing as a {etype}')
             entries = entry['entries']
@@ -1210,7 +1247,7 @@ class DownloadQueue:
                 for property in ("id", "title", "uploader", "uploader_id"):
                     if property in entry:
                         etr[f"{etype}_{property}"] = entry[property]
-                results.append(await self.__add_entry(etr, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already))
+                results.append(await self.__add_entry(etr, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already, request_cookiefile=request_cookiefile))
             if any(res['status'] == 'error' for res in results):
                 return {'status': 'error', 'msg': ', '.join(res['msg'] for res in results if res['status'] == 'error' and 'msg' in res)}
             return {'status': 'ok'}
@@ -1224,11 +1261,13 @@ class DownloadQueue:
                 return {'status': 'ok'}
             if not any(dl.info.url == key for _, dl in self.queue.items()):
                 dl = DownloadInfo(entry['id'], entry.get('title') or entry['id'], key, quality, format, folder, custom_name_prefix, error, entry, playlist_item_limit, split_by_chapters, chapter_template, self.config.SKIP_EXISTING_DOWNLOADS, self.retry_403_max)
-                await self.__add_download(dl, auto_start)
+                add_result = await self.__add_download(dl, auto_start, request_cookiefile=request_cookiefile)
+                if add_result is not None:
+                    return add_result
             return {'status': 'ok'}
         return {'status': 'error', 'msg': f'Unsupported resource "{etype}"'}
 
-    async def add(self, url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start=True, split_by_chapters=False, chapter_template=None, already=None, entry_override=None):
+    async def add(self, url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start=True, split_by_chapters=False, chapter_template=None, already=None, entry_override=None, request_cookiefile=None):
         if entry_override is None and isinstance(already, dict):
             entry_override = already
             already = None
@@ -1240,22 +1279,26 @@ class DownloadQueue:
                 url = override_url
                 entry_override['url'] = override_url
                 entry_override['webpage_url'] = override_url
-        log.info(f'adding {url}: {quality=} {format=} {already=} {folder=} {custom_name_prefix=} {playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=} {entry_override is not None=}')
+        log.info(f'adding {url}: {quality=} {format=} {already=} {folder=} {custom_name_prefix=} {playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=} {entry_override is not None=} {request_cookiefile is not None=}')
         if url in already:
             log.info('recursion detected, skipping')
             return {'status': 'ok'}
         else:
             already.add(url)
-        if isinstance(entry_override, dict):
-            entry = dict(entry_override)
-            if '_type' not in entry:
-                entry['_type'] = 'video'
-            return await self.__add_entry(entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already)
         try:
-            entry = await asyncio.get_running_loop().run_in_executor(None, self.__extract_info, url)
-        except yt_dlp.utils.YoutubeDLError as exc:
-            return {'status': 'error', 'msg': str(exc)}
-        return await self.__add_entry(entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already)
+            if isinstance(entry_override, dict):
+                entry = dict(entry_override)
+                if '_type' not in entry:
+                    entry['_type'] = 'video'
+                return await self.__add_entry(entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already, request_cookiefile=request_cookiefile)
+            try:
+                entry = await asyncio.get_running_loop().run_in_executor(None, self.__extract_info, url, request_cookiefile)
+            except yt_dlp.utils.YoutubeDLError as exc:
+                return {'status': 'error', 'msg': str(exc)}
+            return await self.__add_entry(entry, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, already, request_cookiefile=request_cookiefile)
+        finally:
+            if request_cookiefile and self.request_cookiefile_refs.get(request_cookiefile, 0) == 0:
+                _safe_unlink(request_cookiefile, label='request cookie file')
 
     async def start_pending(self, ids):
         for id in ids:
@@ -1271,6 +1314,8 @@ class DownloadQueue:
     async def cancel(self, ids):
         for id in ids:
             if self.pending.exists(id):
+                dl = self.pending.get(id)
+                self._release_request_cookiefile(getattr(dl, 'request_cookiefile', None))
                 self.pending.delete(id)
                 await self.notifier.canceled(id)
                 continue
@@ -1280,6 +1325,8 @@ class DownloadQueue:
             if self.queue.get(id).started():
                 self.queue.get(id).cancel()
             else:
+                dl = self.queue.get(id)
+                self._release_request_cookiefile(getattr(dl, 'request_cookiefile', None))
                 self.queue.delete(id)
                 await self.notifier.canceled(id)
         return {'status': 'ok'}

@@ -109,6 +109,25 @@ In case you need to use your browser's cookies with MeTube, for example to downl
 * Drop the file in the folder you configured in the docker-compose.yml above
 * Restart the container
 
+### Request-scoped cookies via API
+
+For multi-user setups, `POST /add` also accepts an optional `cookies` field containing the cookie-file text for that request. This avoids sharing a single global cookie file across users.
+
+Example:
+
+```json
+{
+  "url": "https://music.youtube.com/watch?v=abc123def45",
+  "quality": "best",
+  "cookies": "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2145916800\tSID\t..."
+}
+```
+
+Notes:
+* Send cookie contents, not a server-side file path.
+* The payload is capped at 262144 bytes.
+* The server writes it to a temporary file with restrictive permissions and removes it automatically when no longer needed.
+
 ## 🔌 Browser extensions
 
 Browser extensions allow right-clicking videos and sending them directly to MeTube. Please note that if you're on an HTTPS page, your MeTube instance must be behind an HTTPS reverse proxy (see below) for the extensions to work.

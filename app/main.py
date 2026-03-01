@@ -14,6 +14,7 @@ import logging
 import json
 import pathlib
 import re
+import tempfile
 from watchfiles import DefaultFilter, Change, awatch
 
 from ytdl import DownloadQueueNotifier, DownloadQueue
@@ -140,6 +141,61 @@ config = Config()
 # This re-applies the log level after Config loads, in case LOGLEVEL was
 # overridden by config file settings or differs from the environment variable.
 logging.getLogger().setLevel(parseLogLevel(str(config.LOGLEVEL)) or logging.INFO)
+
+REQUEST_COOKIEFILE_MAX_BYTES = 262144
+REQUEST_COOKIEFILE_DIR = os.path.join(config.STATE_DIR, 'request_cookies')
+
+def _safe_remove_file(path, label='file'):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning(f"Failed to remove {label} {path}: {exc}")
+
+def _ensure_request_cookiefile_dir():
+    os.makedirs(REQUEST_COOKIEFILE_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(REQUEST_COOKIEFILE_DIR, 0o700)
+    except OSError:
+        pass
+
+def _cleanup_stale_request_cookiefiles():
+    _ensure_request_cookiefile_dir()
+    for name in os.listdir(REQUEST_COOKIEFILE_DIR):
+        if not name.startswith('request_cookie_'):
+            continue
+        path = os.path.join(REQUEST_COOKIEFILE_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        _safe_remove_file(path, label='stale request cookie file')
+
+def _write_request_cookiefile(cookie_text):
+    if not isinstance(cookie_text, str):
+        raise ValueError('Field "cookies" must be a string when provided.')
+    cookie_bytes = cookie_text.encode('utf-8')
+    if len(cookie_bytes) == 0:
+        return None
+    if len(cookie_bytes) > REQUEST_COOKIEFILE_MAX_BYTES:
+        raise ValueError(f'Field "cookies" exceeds {REQUEST_COOKIEFILE_MAX_BYTES} bytes.')
+
+    _ensure_request_cookiefile_dir()
+    fd, path = tempfile.mkstemp(prefix='request_cookie_', suffix='.txt', dir=REQUEST_COOKIEFILE_DIR)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            try:
+                os.fchmod(handle.fileno(), 0o600)
+            except OSError:
+                pass
+            handle.write(cookie_bytes)
+    except Exception:
+        _safe_remove_file(path, label='request cookie file')
+        raise
+    return path
+
+_cleanup_stale_request_cookiefiles()
 
 _playlist_lock = asyncio.Lock()
 
@@ -299,7 +355,6 @@ if config.YTDL_OPTIONS_FILE:
 async def add(request):
     log.info("Received request to add download")
     post = await request.json()
-    log.info(f"Request data: {post}")
     url = post.get('url')
     quality = post.get('quality')
     if not url or not quality:
@@ -313,6 +368,8 @@ async def add(request):
     split_by_chapters = post.get('split_by_chapters')
     chapter_template = post.get('chapter_template')
     entry_override = post.get('entry')
+    cookies = post.get('cookies')
+    request_cookiefile = None
     if entry_override is not None and not isinstance(entry_override, dict):
         entry_override = None
 
@@ -327,9 +384,45 @@ async def add(request):
     if chapter_template is None:
         chapter_template = config.OUTPUT_TEMPLATE_CHAPTER
 
-    playlist_item_limit = int(playlist_item_limit)
+    if cookies is not None:
+        try:
+            request_cookiefile = _write_request_cookiefile(cookies)
+        except ValueError as exc:
+            log.error(f"Bad request: invalid cookies payload: {exc}")
+            raise web.HTTPBadRequest(text=str(exc))
 
-    status = await dqueue.add(url, quality, format, folder, custom_name_prefix, playlist_item_limit, auto_start, split_by_chapters, chapter_template, entry_override=entry_override)
+    try:
+        playlist_item_limit = int(playlist_item_limit)
+    except (TypeError, ValueError):
+        _safe_remove_file(request_cookiefile, label='request cookie file')
+        log.error("Bad request: 'playlist_item_limit' must be an integer")
+        raise web.HTTPBadRequest(text="'playlist_item_limit' must be an integer")
+
+    log.info(
+        f"Add request parsed: {url=} {quality=} {format=} {folder=} "
+        f"{custom_name_prefix=} {playlist_item_limit=} {auto_start=} "
+        f"{split_by_chapters=} {entry_override is not None=} "
+        f"{request_cookiefile is not None=}"
+    )
+
+    try:
+        status = await dqueue.add(
+            url,
+            quality,
+            format,
+            folder,
+            custom_name_prefix,
+            playlist_item_limit,
+            auto_start,
+            split_by_chapters,
+            chapter_template,
+            entry_override=entry_override,
+            request_cookiefile=request_cookiefile,
+        )
+    except Exception:
+        if request_cookiefile and dqueue.request_cookiefile_refs.get(request_cookiefile, 0) == 0:
+            _safe_remove_file(request_cookiefile, label='request cookie file')
+        raise
     return web.Response(text=serializer.encode(status))
 
 @routes.post(config.URL_PREFIX + 'delete')
